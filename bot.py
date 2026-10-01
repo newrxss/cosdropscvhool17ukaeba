@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from html import escape
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, StateFilter
@@ -28,7 +28,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = "8835340993:AAEUIJamVAigzMg-wBKktl3yoxfFWX8t8_w"
+BOT_TOKEN = "PASTE_NEW_BOT_TOKEN_HERE"
 ADMIN_ID = 8146320391
 
 DB_FILE = os.getenv("DB_FILE", "cosdrop.sqlite3")
@@ -218,7 +218,9 @@ def now():
 
 
 def db():
-    con = sqlite3.connect(DB_FILE)
+    con = sqlite3.connect(DB_FILE, timeout=30)
+    con.execute("PRAGMA busy_timeout=30000")
+    con.execute("PRAGMA journal_mode=WAL")
     con.row_factory = sqlite3.Row
     return con
 
@@ -509,11 +511,27 @@ def ensure(user):
     return row
 
 
+def get_admin_role(user_id):
+    if user_id == ADMIN_ID:
+        return "owner"
+    con = db()
+    row = con.execute("SELECT role FROM admins WHERE user_id=?", (user_id,)).fetchone()
+    con.close()
+    return row["role"] if row else None
+
+
 def is_admin(user_id):
-    return user_id == ADMIN_ID
+    return get_admin_role(user_id) is not None
 
 
-def log_admin(action, target=None, details=""):
+ROLE_LEVELS = {"helper": 1, "moderator": 2, "admin": 3, "owner": 4}
+
+def admin_can(user_id, minimum="helper"):
+    role = get_admin_role(user_id)
+    return role is not None and ROLE_LEVELS.get(role, 0) >= ROLE_LEVELS.get(minimum, 99)
+
+
+def log_admin(action, target=None, details="", admin_id=None):
     con = db()
     con.execute(
         """
@@ -522,7 +540,7 @@ def log_admin(action, target=None, details=""):
         VALUES(?,?,?,?,?)
         """,
         (
-            ADMIN_ID,
+            admin_id if admin_id is not None else ADMIN_ID,
             action,
             target,
             details,
@@ -569,9 +587,10 @@ def back(callback="home"):
     )
 
 
-def admin_kb():
+def admin_kb(user_id=None):
+    uid = user_id if user_id is not None else ADMIN_ID
+    role = get_admin_role(uid) or "helper"
     b = InlineKeyboardBuilder()
-
     buttons = [
         ("📊 Статистика", "adm_stats"),
         ("👥 Пользователи", "adm_users"),
@@ -580,19 +599,21 @@ def admin_kb():
         ("➖ Забрать SD", "adm_take"),
         ("🚫 Блокировки", "adm_blocks"),
         ("🎟 Промокоды", "adm_promo"),
-        ("📦 Кейсы", "adm_cases"),
+        ("📦 Конструктор кейсов", "adm_cases"),
         ("💎 Предметы", "adm_items"),
         ("📝 Заявки", "adm_apps"),
         ("📢 Рассылка", "adm_broadcast"),
         ("📜 Логи", "adm_logs"),
         ("💾 Бэкап БД", "adm_backup"),
+        ("🏆 Достижения", "adm_achievements"),
+        ("📈 Аналитика", "adm_analytics"),
+        ("🧹 Очистка/обслуживание", "adm_maintenance_tools"),
     ]
-
+    if role == "owner":
+        buttons += [("👑 Администраторы", "adm_admins"), ("🛠 Технические работы", "adm_maintenance")]
     for text, data in buttons:
         b.button(text=text, callback_data=data)
-
     b.adjust(2)
-
     return b.as_markup()
 
 
@@ -1805,7 +1826,7 @@ async def admin_command(message: Message):
 
 Управление ботом:
 """,
-        reply_markup=admin_kb(),
+        reply_markup=admin_kb(message.from_user.id),
     )
 
 
@@ -1820,7 +1841,7 @@ async def admin_home(callback: CallbackQuery):
 
 Выбери раздел:
 """,
-        reply_markup=admin_kb(),
+        reply_markup=admin_kb(callback.from_user.id),
     )
 
     await callback.answer()
@@ -2774,173 +2795,263 @@ async def promo_delete_code(
 
 
 # ============================================================
-# ADMIN CASES
+# ADMIN CASE BUILDER
 # ============================================================
 
-@dp.callback_query(F.data == "adm_cases")
-async def admin_cases(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return
+class CaseCreate(StatesGroup):
+    name = State()
+    description = State()
+    price = State()
+    items = State()
+    chances = State()
 
+class CaseEdit(StatesGroup):
+    case_id = State()
+    value = State()
+
+
+async def render_admin_cases(callback_or_message, user_id):
     con = db()
-
-    rows = con.execute(
-        """
-        SELECT id,code,name,price,enabled
-        FROM cases
-        ORDER BY id
-        """
-    ).fetchall()
-
+    rows = con.execute("SELECT id,code,name,price,enabled FROM cases ORDER BY id").fetchall()
     con.close()
-
     lines = []
-
-    for row in rows:
-        status = "🟢" if row["enabled"] else "🔴"
-
-        lines.append(
-            f"{status} <b>{escape(row['name'])}</b>\n"
-            f"└ ID: <code>{row['id']}</code> · "
-            f"{row['price']} SD · "
-            f"<code>{escape(row['code'])}</code>"
-        )
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔄 Вкл/выкл кейс",
-                    callback_data="case_toggle_start",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💰 Изменить цену",
-                    callback_data="case_price_start",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="◀️ Админ-панель",
-                    callback_data="admin_home",
-                )
-            ],
-        ]
-    )
-
-    await callback.message.edit_text(
-        "📦 <b>УПРАВЛЕНИЕ КЕЙСАМИ</b>\n\n"
-        + "\n\n".join(lines),
-        reply_markup=keyboard,
-    )
-
-    await callback.answer()
+    for r in rows:
+        status = "🟢" if r["enabled"] else "🔴"
+        lines.append(f"{status} <b>{escape(r['name'])}</b> · {r['price']} SD · <code>{escape(r['code'])}</code>")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Создать кейс", callback_data="case_create")
+    kb.button(text="✏️ Изменить кейс", callback_data="case_edit_select")
+    kb.button(text="🎁 Настроить выпадения", callback_data="case_items_select")
+    kb.button(text="🔄 Вкл/выкл", callback_data="case_toggle_start")
+    kb.button(text="🗑 Удалить кейс", callback_data="case_delete_select")
+    kb.button(text="◀️ Админ-панель", callback_data="admin_home")
+    kb.adjust(2)
+    text = "📦 <b>КОНСТРУКТОР КЕЙСОВ</b>\n\n" + ("\n".join(lines) if lines else "Кейсов нет.")
+    if hasattr(callback_or_message, "message"):
+        await callback_or_message.message.edit_text(text, reply_markup=kb.as_markup())
+        await callback_or_message.answer()
+    else:
+        await callback_or_message.answer(text, reply_markup=kb.as_markup())
 
 
-@dp.callback_query(F.data == "case_toggle_start")
-async def case_toggle_start(callback: CallbackQuery):
-    con = db()
-
-    rows = con.execute(
-        """
-        SELECT id,name,enabled
-        FROM cases
-        ORDER BY id
-        """
-    ).fetchall()
-
-    con.close()
-
-    keyboard = []
-
-    for row in rows:
-        status = "🟢" if row["enabled"] else "🔴"
-
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{status} {row['name']}",
-                    callback_data=f"case_toggle:{row['id']}",
-                )
-            ]
-        )
-
-    keyboard.append(
-        [
-            InlineKeyboardButton(
-                text="◀️ Назад",
-                callback_data="adm_cases",
-            )
-        ]
-    )
-
-    await callback.message.edit_text(
-        "🎮 Выбери кейс:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=keyboard
-        ),
-    )
-
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("case_toggle:"))
-async def case_toggle(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
+@dp.callback_query(F.data == "adm_cases")
+async def admin_cases_new(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id, "admin"):
         return
+    await render_admin_cases(callback, callback.from_user.id)
 
-    case_id = int(
-        callback.data.split(":")[1]
-    )
 
+@dp.callback_query(F.data == "case_create")
+async def case_create_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_can(callback.from_user.id, "admin"):
+        return
+    await state.set_state(CaseCreate.name)
+    await callback.message.edit_text("➕ <b>НОВЫЙ КЕЙС</b>\n\nВведите название кейса:")
+    await callback.answer()
+
+
+@dp.message(StateFilter(CaseCreate.name))
+async def case_create_name(message: Message, state: FSMContext):
+    if not admin_can(message.from_user.id, "admin"):
+        return
+    name = (message.text or "").strip()[:80]
+    if len(name) < 2:
+        return await message.answer("❌ Слишком короткое название.")
+    await state.update_data(name=name)
+    await state.set_state(CaseCreate.description)
+    await message.answer("📝 Введите описание кейса:")
+
+
+@dp.message(StateFilter(CaseCreate.description))
+async def case_create_description(message: Message, state: FSMContext):
+    if not admin_can(message.from_user.id, "admin"):
+        return
+    await state.update_data(description=(message.text or "").strip()[:500])
+    await state.set_state(CaseCreate.price)
+    await message.answer("💰 Введите цену в SD (0 для бесплатного):")
+
+
+@dp.message(StateFilter(CaseCreate.price))
+async def case_create_price(message: Message, state: FSMContext):
+    try:
+        price = int((message.text or "").strip())
+    except ValueError:
+        return await message.answer("❌ Введите целое число.")
+    if price < 0:
+        return await message.answer("❌ Цена не может быть отрицательной.")
+    data = await state.get_data()
+    code = "custom_" + re.sub(r"[^a-z0-9]+", "_", data["name"].lower()).strip("_")[:25]
+    if not code or code == "custom_":
+        code = "custom_case"
     con = db()
+    base = code
+    n = 2
+    while con.execute("SELECT 1 FROM cases WHERE code=?", (code,)).fetchone():
+        code = f"{base}_{n}"
+        n += 1
+    cur = con.execute("INSERT INTO cases(code,name,description,price,enabled) VALUES(?,?,?,?,1)", (code,data["name"],data["description"],price))
+    case_id = cur.lastrowid
+    con.commit(); con.close()
+    await state.clear()
+    log_admin("create_case", details=f"case={case_id},code={code}", admin_id=message.from_user.id)
+    await message.answer(f"✅ Кейс <b>{escape(data['name'])}</b> создан.\nID: <code>{case_id}</code>\nТеперь добавь предметы через 📦 → 🎁 Настроить выпадения.")
 
-    row = con.execute(
-        """
-        SELECT enabled,name
-        FROM cases
-        WHERE id=?
-        """,
-        (case_id,),
-    ).fetchone()
 
-    if not row:
-        con.close()
-        return await callback.answer(
-            "Кейс не найден.",
-            show_alert=True,
-        )
+@dp.callback_query(F.data == "case_edit_select")
+async def case_edit_select(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id, "admin"):
+        return
+    con=db(); rows=con.execute("SELECT id,name,price FROM cases ORDER BY id").fetchall(); con.close()
+    kb=InlineKeyboardBuilder()
+    for r in rows: kb.button(text=f"{r['name']} · {r['price']} SD", callback_data=f"case_edit:{r['id']}")
+    kb.button(text="◀️ Назад", callback_data="adm_cases"); kb.adjust(1)
+    await callback.message.edit_text("✏️ Выберите кейс:", reply_markup=kb.as_markup()); await callback.answer()
 
-    new_value = 0 if row["enabled"] else 1
 
-    con.execute(
-        """
-        UPDATE cases
-        SET enabled=?
-        WHERE id=?
-        """,
-        (
-            new_value,
-            case_id,
-        ),
-    )
+@dp.callback_query(F.data.startswith("case_edit:"))
+async def case_edit_menu(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id, "admin"): return
+    cid=int(callback.data.split(":")[1])
+    con=db(); r=con.execute("SELECT * FROM cases WHERE id=?",(cid,)).fetchone(); con.close()
+    if not r: return await callback.answer("Кейс не найден", show_alert=True)
+    kb=InlineKeyboardBuilder()
+    kb.button(text="✏️ Название", callback_data=f"case_edit_name:{cid}")
+    kb.button(text="📝 Описание", callback_data=f"case_edit_desc:{cid}")
+    kb.button(text="💰 Цена", callback_data=f"case_edit_price:{cid}")
+    kb.button(text="🎁 Предметы", callback_data=f"case_items:{cid}")
+    kb.button(text="👁 Посмотреть выпадения", callback_data=f"case_show_items:{cid}")
+    kb.button(text="🔄 Вкл/выкл", callback_data=f"case_toggle:{cid}")
+    kb.button(text="◀️ Назад", callback_data="adm_cases"); kb.adjust(2)
+    await callback.message.edit_text(f"📦 <b>{escape(r['name'])}</b>\n\nКод: <code>{escape(r['code'])}</code>\nЦена: {r['price']} SD\nСтатус: {'🟢' if r['enabled'] else '🔴'}", reply_markup=kb.as_markup()); await callback.answer()
 
-    con.commit()
-    con.close()
 
-    log_admin(
-        "toggle_case",
-        details=f"{case_id}:{new_value}",
-    )
+async def begin_case_edit(callback, state, cid, field, prompt):
+    await state.update_data(case_id=cid, field=field)
+    await state.set_state(CaseEdit.value)
+    await callback.message.edit_text(prompt)
+    await callback.answer()
 
-    await callback.answer(
-        "Кейс включён." if new_value else "Кейс выключен.",
-        show_alert=True,
-    )
+@dp.callback_query(F.data.startswith("case_edit_name:"))
+async def case_edit_name_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_can(callback.from_user.id,"admin"): return
+    await begin_case_edit(callback,state,int(callback.data.split(":")[1]),"name","✏️ Введите новое название:")
 
-    await admin_cases(callback)
+@dp.callback_query(F.data.startswith("case_edit_desc:"))
+async def case_edit_desc_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_can(callback.from_user.id,"admin"): return
+    await begin_case_edit(callback,state,int(callback.data.split(":")[1]),"description","📝 Введите новое описание:")
 
+@dp.callback_query(F.data.startswith("case_edit_price:"))
+async def case_edit_price_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_can(callback.from_user.id,"admin"): return
+    await begin_case_edit(callback,state,int(callback.data.split(":")[1]),"price","💰 Введите новую цену в SD:")
+
+@dp.message(StateFilter(CaseEdit.value))
+async def case_edit_save(message: Message, state: FSMContext):
+    if not admin_can(message.from_user.id,"admin"): return
+    data=await state.get_data(); field=data.get("field"); value=(message.text or "").strip()
+    if field=="chance":
+        try: value=float(value.replace(",","."))
+        except ValueError: return await message.answer("❌ Шанс должен быть числом.")
+        if value < 0 or value > 100: return await message.answer("❌ Шанс должен быть от 0 до 100.")
+        con=db(); con.execute("UPDATE case_items SET chance=? WHERE case_id=? AND item_id=?",(value,data["case_id"],data["item_id"])); con.commit(); con.close()
+        log_admin("edit_case_chance",details=f"case={data['case_id']},item={data['item_id']},chance={value}",admin_id=message.from_user.id)
+        await state.clear(); return await message.answer("✅ Шанс изменён. Проверь, чтобы сумма была ровно 100%.")
+    if field=="price":
+        try: value=int(value)
+        except ValueError: return await message.answer("❌ Цена должна быть числом.")
+        if value<0: return await message.answer("❌ Цена не может быть отрицательной.")
+    else:
+        value=value[:500]
+        if not value: return await message.answer("❌ Значение не может быть пустым.")
+    con=db(); con.execute(f"UPDATE cases SET {field}=? WHERE id=?",(value,data["case_id"])); con.commit(); con.close()
+    log_admin("edit_case",details=f"case={data['case_id']},{field}={value}",admin_id=message.from_user.id)
+    await state.clear(); await message.answer("✅ Кейс обновлён.")
+
+
+@dp.callback_query(F.data == "case_items_select")
+async def case_items_select(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"admin"): return
+    con=db(); rows=con.execute("SELECT id,name FROM cases ORDER BY id").fetchall(); con.close()
+    kb=InlineKeyboardBuilder()
+    for r in rows: kb.button(text=r["name"], callback_data=f"case_items:{r['id']}")
+    kb.button(text="◀️ Назад",callback_data="adm_cases"); kb.adjust(1)
+    await callback.message.edit_text("🎁 Выберите кейс:",reply_markup=kb.as_markup()); await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("case_items:"))
+async def case_items_menu(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"admin"): return
+    cid=int(callback.data.split(":")[1]); con=db()
+    case=con.execute("SELECT name FROM cases WHERE id=?",(cid,)).fetchone()
+    items=con.execute("SELECT i.id,i.name,i.rarity,COALESCE(ci.chance,0) chance FROM items i LEFT JOIN case_items ci ON ci.item_id=i.id AND ci.case_id=? WHERE i.enabled=1 ORDER BY i.id",(cid,)).fetchall(); con.close()
+    kb=InlineKeyboardBuilder()
+    for r in items:
+        mark="☑️" if r["chance"]>0 else "☐"
+        kb.button(text=f"{mark} {r['name']} · {r['chance']}%",callback_data=f"case_item_toggle:{cid}:{r['id']}")
+        if r["chance"] > 0:
+            kb.button(text=f"🎲 Шанс {r['name']}", callback_data=f"case_chance:{cid}:{r['id']}")
+    kb.button(text="💾 Проверить 100%",callback_data=f"case_validate:{cid}")
+    kb.button(text="◀️ Назад",callback_data=f"case_edit:{cid}"); kb.adjust(1)
+    await callback.message.edit_text(f"🎁 <b>{escape(case['name'])}</b>\n\nНажимай на предмет, чтобы добавить/убрать его.\nДля добавленных предметов потом задаётся шанс.",reply_markup=kb.as_markup()); await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("case_item_toggle:"))
+async def case_item_toggle(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"admin"): return
+    _,cid,iid=callback.data.split(":"); cid=int(cid); iid=int(iid); con=db()
+    row=con.execute("SELECT chance FROM case_items WHERE case_id=? AND item_id=?",(cid,iid)).fetchone()
+    if row: con.execute("DELETE FROM case_items WHERE case_id=? AND item_id=?",(cid,iid))
+    else: con.execute("INSERT INTO case_items(case_id,item_id,chance) VALUES(?,?,?)",(cid,iid,1))
+    con.commit(); con.close()
+    await case_items_menu(callback)
+
+
+@dp.callback_query(F.data.startswith("case_chance:"))
+async def case_chance_start(callback: CallbackQuery, state: FSMContext):
+    if not admin_can(callback.from_user.id, "admin"):
+        return
+    _, cid, iid = callback.data.split(":")
+    await state.update_data(case_id=int(cid), item_id=int(iid))
+    await state.set_state(CaseEdit.value)
+    await state.update_data(field="chance")
+    await callback.message.edit_text("🎲 Введите шанс выпадения от 0 до 100%. Например: <code>12.5</code>")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("case_validate:"))
+async def case_validate(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"admin"): return
+    cid=int(callback.data.split(":")[1]); con=db(); rows=con.execute("SELECT chance FROM case_items WHERE case_id=?",(cid,)).fetchall(); total=sum(float(r["chance"]) for r in rows); con.close()
+    if not rows: return await callback.answer("❌ В кейсе нет предметов",show_alert=True)
+    if abs(total-100)>0.001: return await callback.answer(f"❌ Сумма шансов: {total:g}%. Нужно ровно 100%.",show_alert=True)
+    log_admin("validate_case",details=f"case={cid}",admin_id=callback.from_user.id)
+    await callback.answer("✅ Шансы корректны: 100%",show_alert=True)
+
+
+@dp.callback_query(F.data == "case_delete_select")
+async def case_delete_select(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"owner"): return
+    con=db(); rows=con.execute("SELECT id,name FROM cases ORDER BY id").fetchall(); con.close(); kb=InlineKeyboardBuilder()
+    for r in rows: kb.button(text=f"🗑 {r['name']}",callback_data=f"case_delete:{r['id']}")
+    kb.button(text="◀️ Назад",callback_data="adm_cases"); kb.adjust(1)
+    await callback.message.edit_text("🗑 Выберите кейс для удаления:",reply_markup=kb.as_markup()); await callback.answer()
+
+@dp.callback_query(F.data.startswith("case_delete:"))
+async def case_delete_confirm(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"owner"): return
+    cid=int(callback.data.split(":")[1]); con=db(); r=con.execute("SELECT name FROM cases WHERE id=?",(cid,)).fetchone(); con.close()
+    if not r: return await callback.answer("Не найден",show_alert=True)
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚠️ Да, удалить",callback_data=f"case_delete_yes:{cid}"),InlineKeyboardButton(text="Отмена",callback_data="adm_cases")]])
+    await callback.message.edit_text(f"⚠️ Удалить кейс <b>{escape(r['name'])}</b>?\nИстория открытий останется в БД.",reply_markup=kb); await callback.answer()
+
+@dp.callback_query(F.data.startswith("case_delete_yes:"))
+async def case_delete_yes(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"owner"): return
+    cid=int(callback.data.split(":")[1]); con=db(); r=con.execute("SELECT name FROM cases WHERE id=?",(cid,)).fetchone()
+    if not r: con.close(); return await callback.answer("Не найден",show_alert=True)
+    con.execute("DELETE FROM case_items WHERE case_id=?",(cid,)); con.execute("DELETE FROM cases WHERE id=?",(cid,)); con.commit(); con.close()
+    log_admin("delete_case",details=f"case={cid},name={r['name']}",admin_id=callback.from_user.id)
+    await callback.answer("Кейс удалён",show_alert=True); await render_admin_cases(callback,callback.from_user.id)
 
 # ============================================================
 # ADMIN ITEMS
@@ -3470,6 +3581,242 @@ async def save_case_price(
     )
 
 
+
+# ============================================================
+# EXTRA ADMIN SYSTEM: ADMINS / MAINTENANCE / ANALYTICS / TOOLS
+# ============================================================
+
+class AdminCreate(StatesGroup):
+    uid = State()
+    role = State()
+
+class AdminRoleEdit(StatesGroup):
+    uid = State()
+    role = State()
+
+class MaintenanceSetup(StatesGroup):
+    text = State()
+    hours = State()
+
+class UserAction(StatesGroup):
+    uid = State()
+    value = State()
+
+
+def role_label(role):
+    return {"owner":"👑 OWNER","admin":"🛡 ADMIN","moderator":"🔧 MODERATOR","helper":"🆘 HELPER"}.get(role, role or "-")
+
+
+def maintenance_state():
+    con=db(); rows=con.execute("SELECT key,value FROM settings WHERE key IN ('maintenance_enabled','maintenance_text','maintenance_until')").fetchall(); con.close()
+    d={r['key']:r['value'] for r in rows}
+    return d
+
+
+def maintenance_enabled():
+    d=maintenance_state()
+    if d.get('maintenance_enabled') != '1': return False
+    until=d.get('maintenance_until','')
+    if until:
+        try:
+            if datetime.now(timezone.utc).timestamp() >= float(until):
+                con=db(); con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('maintenance_enabled','0')"); con.commit(); con.close(); return False
+        except Exception: pass
+    return True
+
+
+def set_setting(key,value):
+    con=db(); con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",(key,str(value))); con.commit(); con.close()
+
+
+def maintenance_message():
+    d=maintenance_state(); text=d.get('maintenance_text') or 'Проводятся технические работы.'
+    until=d.get('maintenance_until','')
+    timer=''
+    if until:
+        try:
+            seconds=max(0,int(float(until)-datetime.now(timezone.utc).timestamp()))
+            h=seconds//3600; m=(seconds%3600)//60
+            if h: timer=f"\n\n⏱ Ожидаемое время: <b>{h} ч. {m} мин.</b>"
+            elif m: timer=f"\n\n⏱ Ожидаемое время: <b>{m} мин.</b>"
+        except Exception: pass
+    return f"🛠 <b>ТЕХНИЧЕСКИЕ РАБОТЫ</b>\n\n{escape(text)}{timer}\n\nНаш создатель — @d3v_exe\nМедиа • Купить • Техподдержка — @d3v_exe\n\n🙏 Просим немного подождать."
+
+
+class MaintenanceMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user=getattr(event,'from_user',None)
+        if user and is_admin(user.id):
+            return await handler(event,data)
+        if maintenance_enabled():
+            if isinstance(event, CallbackQuery):
+                await event.answer("🛠 Технические работы",show_alert=True)
+                try: await event.message.edit_text(maintenance_message())
+                except Exception: pass
+            else:
+                try: await event.answer(maintenance_message())
+                except Exception: pass
+            return
+        return await handler(event,data)
+
+
+@dp.message(Command("offbop"))
+async def cmd_offbop(message: Message, state: FSMContext):
+    if not admin_can(message.from_user.id,"owner"): return
+    await state.set_state(MaintenanceSetup.text)
+    await message.answer("🛠 <b>ТЕХНИЧЕСКИЕ РАБОТЫ</b>\n\nВведите текст, который увидят пользователи:")
+
+@dp.message(StateFilter(MaintenanceSetup.text))
+async def maintenance_text(message: Message, state: FSMContext):
+    if not admin_can(message.from_user.id,"owner"): return
+    text=(message.text or '').strip()[:2000]
+    if not text: return await message.answer("❌ Текст не может быть пустым.")
+    await state.update_data(text=text); await state.set_state(MaintenanceSetup.hours)
+    await message.answer("⏱ На сколько часов поставить техработы?\nМожно написать: <code>2</code>, <code>0.5</code> или <code>без таймера</code>.")
+
+@dp.message(StateFilter(MaintenanceSetup.hours))
+async def maintenance_hours(message: Message, state: FSMContext):
+    if not admin_can(message.from_user.id,"owner"): return
+    raw=(message.text or '').strip().lower(); data=await state.get_data(); until=''
+    if raw not in ('без таймера','нет','0'):
+        try:
+            hours=float(raw.replace(',','.'))
+            if hours<=0 or hours>720: raise ValueError
+            until=str(datetime.now(timezone.utc).timestamp()+hours*3600)
+        except ValueError: return await message.answer("❌ Введите часы числом от 0.1 до 720.")
+    set_setting('maintenance_enabled','1'); set_setting('maintenance_text',data['text']); set_setting('maintenance_until',until)
+    log_admin('maintenance_on',details=f'hours={raw}',admin_id=message.from_user.id)
+    await state.clear(); await message.answer(maintenance_message()+"\n\n✅ Режим включён.")
+
+@dp.message(Command("onop"))
+async def cmd_onop(message: Message):
+    if not admin_can(message.from_user.id,"owner"): return
+    set_setting('maintenance_enabled','0'); set_setting('maintenance_until','')
+    log_admin('maintenance_off',admin_id=message.from_user.id)
+    await message.answer("🟢 <b>Технические работы завершены.</b>\nБот снова работает в обычном режиме.")
+
+
+@dp.callback_query(F.data == "adm_maintenance")
+async def adm_maintenance(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"owner"): return
+    d=maintenance_state(); status='🟢 ВЫКЛ' if not maintenance_enabled() else '🔴 ВКЛ'
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='🛠 Включить',callback_data='maintenance_start')],
+        [InlineKeyboardButton(text='🟢 Выключить',callback_data='maintenance_stop')],
+        [InlineKeyboardButton(text='◀️ Назад',callback_data='admin_home')]])
+    await callback.message.edit_text(f"🛠 <b>ТЕХНИЧЕСКИЕ РАБОТЫ</b>\n\nСтатус: <b>{status}</b>\n\nТекст: {escape(d.get('maintenance_text','не задан'))}",reply_markup=kb); await callback.answer()
+
+@dp.callback_query(F.data == 'maintenance_start')
+async def maintenance_start_button(callback: CallbackQuery,state:FSMContext):
+    if not admin_can(callback.from_user.id,'owner'): return
+    await state.set_state(MaintenanceSetup.text); await callback.message.edit_text('🛠 Введите текст технических работ:'); await callback.answer()
+
+@dp.callback_query(F.data == 'maintenance_stop')
+async def maintenance_stop_button(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    set_setting('maintenance_enabled','0'); set_setting('maintenance_until',''); log_admin('maintenance_off',admin_id=callback.from_user.id)
+    await callback.answer('Техработы выключены',show_alert=True); await adm_maintenance(callback)
+
+
+@dp.callback_query(F.data == 'adm_admins')
+async def adm_admins(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    con=db(); rows=con.execute("SELECT user_id,role,created_at FROM admins ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'moderator' THEN 2 ELSE 3 END, user_id").fetchall(); con.close()
+    text='👑 <b>АДМИНИСТРАТОРЫ</b>\n\n'+('\n'.join(f"{role_label(r['role'])} · <code>{r['user_id']}</code>" for r in rows) if rows else 'Нет администраторов.')
+    kb=InlineKeyboardBuilder(); kb.button(text='➕ Добавить',callback_data='admin_add'); kb.button(text='⭐ Изменить ранг',callback_data='admin_role_select'); kb.button(text='🗑 Удалить',callback_data='admin_delete_select'); kb.button(text='◀️ Назад',callback_data='admin_home'); kb.adjust(1)
+    await callback.message.edit_text(text,reply_markup=kb.as_markup()); await callback.answer()
+
+@dp.callback_query(F.data == 'admin_add')
+async def admin_add_start(callback: CallbackQuery,state:FSMContext):
+    if not admin_can(callback.from_user.id,'owner'): return
+    await state.set_state(AdminCreate.uid); await callback.message.edit_text('➕ Введите Telegram ID нового администратора:'); await callback.answer()
+
+@dp.message(StateFilter(AdminCreate.uid))
+async def admin_add_uid(message: Message,state:FSMContext):
+    try: uid=int((message.text or '').strip())
+    except ValueError: return await message.answer('❌ ID должен быть числом.')
+    if uid<=0: return await message.answer('❌ Некорректный ID.')
+    if get_admin_role(uid): return await message.answer('❌ Этот пользователь уже администратор.')
+    await state.update_data(uid=uid); await state.set_state(AdminCreate.role)
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🛡 ADMIN',callback_data='newrole:admin')],[InlineKeyboardButton(text='🔧 MODERATOR',callback_data='newrole:moderator')],[InlineKeyboardButton(text='🆘 HELPER',callback_data='newrole:helper')]])
+    await message.answer('⭐ Выберите ранг:',reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('newrole:'))
+async def admin_add_role(callback: CallbackQuery,state:FSMContext):
+    if not admin_can(callback.from_user.id,'owner'): return
+    data=await state.get_data(); role=callback.data.split(':')[1]
+    if not data.get('uid'): return await callback.answer('Сессия истекла',show_alert=True)
+    con=db(); con.execute("INSERT INTO admins(user_id,role,created_at) VALUES(?,?,?)",(data['uid'],role,now())); con.commit(); con.close()
+    log_admin('add_admin',target=data['uid'],details=role,admin_id=callback.from_user.id); await state.clear(); await callback.answer('Администратор добавлен',show_alert=True); await adm_admins(callback)
+
+@dp.callback_query(F.data == 'admin_role_select')
+async def admin_role_select(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    con=db(); rows=con.execute("SELECT user_id,role FROM admins WHERE user_id!=? ORDER BY user_id",(ADMIN_ID,)).fetchall(); con.close(); kb=InlineKeyboardBuilder()
+    for r in rows: kb.button(text=f"{role_label(r['role'])} · {r['user_id']}",callback_data=f'admin_role:{r["user_id"]}')
+    kb.button(text='◀️ Назад',callback_data='adm_admins'); kb.adjust(1)
+    await callback.message.edit_text('⭐ Выберите администратора:',reply_markup=kb.as_markup()); await callback.answer()
+
+@dp.callback_query(F.data.startswith('admin_role:'))
+async def admin_role_menu(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    uid=int(callback.data.split(':')[1]); kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🛡 ADMIN',callback_data=f'role_set:{uid}:admin')],[InlineKeyboardButton(text='🔧 MODERATOR',callback_data=f'role_set:{uid}:moderator')],[InlineKeyboardButton(text='🆘 HELPER',callback_data=f'role_set:{uid}:helper')],[InlineKeyboardButton(text='◀️ Назад',callback_data='adm_admins')]])
+    await callback.message.edit_text(f'⭐ Новый ранг для <code>{uid}</code>:',reply_markup=kb); await callback.answer()
+
+@dp.callback_query(F.data.startswith('role_set:'))
+async def admin_role_set(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    _,uid,role=callback.data.split(':'); uid=int(uid)
+    if uid==ADMIN_ID: return await callback.answer('Владельца нельзя изменить.',show_alert=True)
+    con=db(); con.execute('UPDATE admins SET role=? WHERE user_id=?',(role,uid)); con.commit(); con.close(); log_admin('change_admin_role',target=uid,details=role,admin_id=callback.from_user.id)
+    await callback.answer('Ранг изменён',show_alert=True); await adm_admins(callback)
+
+@dp.callback_query(F.data == 'admin_delete_select')
+async def admin_delete_select(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    con=db(); rows=con.execute("SELECT user_id,role FROM admins WHERE user_id!=? ORDER BY user_id",(ADMIN_ID,)).fetchall(); con.close(); kb=InlineKeyboardBuilder()
+    for r in rows: kb.button(text=f'🗑 {r["user_id"]} · {role_label(r["role"])}',callback_data=f'admin_delete:{r["user_id"]}')
+    kb.button(text='◀️ Назад',callback_data='adm_admins'); kb.adjust(1)
+    await callback.message.edit_text('🗑 Выберите администратора:',reply_markup=kb.as_markup()); await callback.answer()
+
+@dp.callback_query(F.data.startswith('admin_delete:'))
+async def admin_delete(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'owner'): return
+    uid=int(callback.data.split(':')[1]); con=db(); con.execute('DELETE FROM admins WHERE user_id=? AND user_id!=?',(uid,ADMIN_ID)); con.commit(); con.close(); log_admin('delete_admin',target=uid,admin_id=callback.from_user.id); await callback.answer('Администратор удалён',show_alert=True); await adm_admins(callback)
+
+
+@dp.callback_query(F.data == 'adm_analytics')
+async def adm_analytics(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'moderator'): return
+    con=db(); opens=con.execute('SELECT COUNT(*) n FROM case_opens').fetchone()['n']; today=con.execute("SELECT COUNT(*) n FROM case_opens WHERE created_at >= date('now')").fetchone()['n']; users7=con.execute("SELECT COUNT(*) n FROM users WHERE created_at >= datetime('now','-7 day')").fetchone()['n']; top=con.execute("SELECT c.name,COUNT(*) n FROM case_opens o JOIN cases c ON c.id=o.case_id GROUP BY o.case_id ORDER BY n DESC LIMIT 5").fetchall(); con.close()
+    toptext='\n'.join(f"• {escape(r['name'])}: {r['n']}" for r in top) or 'нет данных'
+    await callback.message.edit_text(f'📈 <b>АНАЛИТИКА</b>\n\n🎁 Всего открытий: <b>{opens}</b>\n🔥 Сегодня: <b>{today}</b>\n👥 Новых за 7 дней: <b>{users7}</b>\n\n📦 Популярные кейсы:\n{toptext}',reply_markup=admin_kb(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == 'adm_achievements')
+async def adm_achievements(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'admin'): return
+    con=db(); rows=con.execute("SELECT a.name,a.reward,COUNT(ua.id) n FROM achievements a LEFT JOIN user_achievements ua ON ua.achievement_id=a.id GROUP BY a.id ORDER BY a.id").fetchall(); con.close()
+    text='🏆 <b>ДОСТИЖЕНИЯ</b>\n\n'+'\n'.join(f"{escape(r['name'])} — {r['n']} получений · +{r['reward']} SD" for r in rows)
+    await callback.message.edit_text(text,reply_markup=admin_kb(callback.from_user.id)); await callback.answer()
+
+@dp.callback_query(F.data == 'adm_maintenance_tools')
+async def adm_maintenance_tools(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,'admin'): return
+    con=db(); orphan=con.execute("SELECT COUNT(*) n FROM inventory WHERE item_id NOT IN (SELECT id FROM items)").fetchone()['n']; logs=con.execute('SELECT COUNT(*) n FROM admin_logs').fetchone()['n']; size=os.path.getsize(DB_FILE) if os.path.exists(DB_FILE) else 0; con.close()
+    await callback.message.edit_text(f'🧹 <b>ОБСЛУЖИВАНИЕ</b>\n\n💾 БД: {size:,} bytes\n📜 Логов: {logs}\n🧩 Сломанных записей инвентаря: {orphan}\n\nУдаление данных здесь не выполняется автоматически.',reply_markup=admin_kb(callback.from_user.id)); await callback.answer()
+
+
+
+@dp.callback_query(F.data.startswith("case_show_items:"))
+async def case_show_items(callback: CallbackQuery):
+    if not admin_can(callback.from_user.id,"admin"): return
+    cid=int(callback.data.split(":")[1]); con=db(); case=con.execute("SELECT name FROM cases WHERE id=?",(cid,)).fetchone(); rows=con.execute("SELECT i.name,i.rarity,ci.chance FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=? ORDER BY ci.chance DESC",(cid,)).fetchall(); con.close()
+    if not case: return await callback.answer("Кейс не найден",show_alert=True)
+    total=sum(float(x['chance']) for x in rows)
+    text=f"📦 <b>{escape(case['name'])}</b>\n\n"+("\n".join(f"{RARITY.get(r['rarity'],'⚪')} {escape(r['name'])} — <b>{r['chance']:g}%</b>" for r in rows) if rows else "Предметов нет.")+f"\n\n🎲 Сумма: <b>{total:g}%</b>"
+    await callback.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎁 Настроить',callback_data=f'case_items:{cid}')],[InlineKeyboardButton(text='◀️ Назад',callback_data='adm_cases')]])); await callback.answer()
+
+
 # ============================================================
 # FALLBACK
 # ============================================================
@@ -3494,6 +3841,9 @@ async def fallback(message: Message):
 
 async def main():
     init_db()
+    # Middleware подключается после всех handlers, но до запуска polling.
+    dp.message.middleware(MaintenanceMiddleware())
+    dp.callback_query.middleware(MaintenanceMiddleware())
 
     logging.info(
         "COS-DROP started | DB=%s",
