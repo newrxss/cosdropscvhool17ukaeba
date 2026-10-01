@@ -28,7 +28,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = "8835340993:AAFZE730NKzcObK3GzGwfVbPPuXTdu-NM0g"
+BOT_TOKEN = "8835340993:AAEUIJamVAigzMg-wBKktl3yoxfFWX8t8_w"
 ADMIN_ID = 8146320391
 
 DB_FILE = os.getenv("DB_FILE", "cosdrop.sqlite3")
