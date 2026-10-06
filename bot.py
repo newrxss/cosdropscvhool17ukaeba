@@ -25,7 +25,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # CONFIG
 # ============================================================
 
-BOT_TOKEN = "8835340993:AAHaD0qLCmtB7ien6R1KPgEfESX0CEqOnRw"
+BOT_TOKEN = "8984416350:AAG6y9BXwwEud5R3LfcPHniCfhr744tHefk"
 ADMIN_ID = 8146320391
 
 DB_FILE = os.getenv("DB_FILE", "cosdrop.sqlite3")
@@ -184,6 +184,47 @@ def now():
 
 def today():
     return datetime.now(timezone.utc).date().isoformat()
+LIMIT_DEFAULTS = {
+    "starter_sd": 100, "daily_base": 50, "daily_streak_7": 300, "daily_streak_30": 2000,
+    "case_cooldown": 3, "sell_commission": 0.10, "upgrade_chance": 0.60,
+    "casino_min": 10, "casino_max": 10000, "casino_max_win": 50000, "casino_loss_limit": 5000,
+    "duel_min": 100, "duel_commission": 0.05,
+    "min_withdraw": 500, "max_withdraw": 10000,
+    "ref_invite": 500, "ref_donate": 2000,
+    "sub_price": 200, "sub_days": 30,
+    "pack_100": 20, "pack_400": 30, "pack_1000": 67, "pack_1500": 170,
+    "registration_open": 1, "referral_enabled": 1, "casino_enabled": 1,
+    "withdraw_enabled": 1, "maintenance_mode": 0,
+}
+
+
+def get_limit(key):
+    d = LIMIT_DEFAULTS.get(key, 0)
+    try:
+        con = db()
+        r = con.execute("SELECT value FROM settings WHERE key=?", (f"lim_{key}",)).fetchone()
+        con.close()
+    except Exception:
+        return d
+    if not r:
+        return d
+    v = r["value"]
+    try:
+        if isinstance(d, float):
+            return float(v)
+        if isinstance(d, int):
+            return int(v)
+    except Exception:
+        return d
+    return v
+
+
+def set_limit(key, value):
+    con = db()
+    con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (f"lim_{key}", str(value)))
+    con.commit()
+    con.close()
+
 
 
 def db():
@@ -508,8 +549,24 @@ def casino_menu():
 
 
 def bet_kb(game):
+    mn = get_limit("casino_min")
+    mx = get_limit("casino_max")
+    # 6 удобных точек между min и max
+    steps = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000,
+             25000, 50000, 100000, 250000, 500000, 1000000,
+             2500000, 5000000, 8000000]
+    opts = [v for v in steps if mn <= v <= mx]
+    if not opts:
+        opts = [mn, mx]
+    elif opts[-1] != mx:
+        opts.append(mx)
+    # если точек больше 6 — берём 6 самых показательных
+    if len(opts) > 6:
+        # берём шаг, чтобы уложиться в 6
+        idxs = [0, len(opts)//5, 2*len(opts)//5, 3*len(opts)//5, 4*len(opts)//5, len(opts)-1]
+        opts = sorted(set(opts[i] for i in idxs))
     b = InlineKeyboardBuilder()
-    for v in [10, 50, 100, 500, 1000, 5000]:
+    for v in opts:
         b.button(text=f"{v}", callback_data=f"bet:{game}:{v}")
     b.button(text="✏️ Своя", callback_data=f"bet:{game}:custom")
     b.button(text="◀️ Назад", callback_data="casino")
@@ -4457,11 +4514,21 @@ async def a2g_reset(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "a2g_limits")
 async def a2g_limits(callback: CallbackQuery):
-    if not a2_guard(callback.from_user.id): return
-    await callback.message.edit_text(
-        f"💵 <b>ЛИМИТЫ КАЗИНО</b>\n\nМин: {CASINO_MIN_BET}\nМакс: {CASINO_MAX_BET}\n"
-        f"Макс выигрыш: {CASINO_MAX_WIN}\nДневной лимит проигрыша: {CASINO_DAILY_LOSS_LIMIT}",
-        reply_markup=a2_root_kb())
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    for key, name in [
+        ("casino_min","Мин ставка"),
+        ("casino_max","Макс ставка"),
+        ("casino_max_win","Макс выигрыш"),
+        ("casino_loss_limit","Лимит проигрыша"),
+        ("duel_min","Мин дуэли"),
+        ("duel_commission","Комиссия дуэли"),
+    ]:
+        b.button(text=f"{name}: {get_limit(key)}", callback_data=f"a3le:{key}")
+    b.button(text="◀️ Назад", callback_data="a2_casino")
+    b.adjust(1)
+    await callback.message.edit_text("💵 <b>ЛИМИТЫ КАЗИНО</b>\n\nНажми на любой, чтобы изменить:",
+                                     reply_markup=b.as_markup())
     await callback.answer()
 
 # ============================================================
@@ -4877,17 +4944,319 @@ async def a2s_unknown(callback: CallbackQuery):
 # FALLBACK
 # ============================================================
 
-@dp.message()
+@dp.message(StateFilter(None))
 async def fallback(message: Message):
+    txt = message.text or ""
+    if txt.startswith("/admin3"):
+        return await a2_open(message)
+    if txt.startswith("/admin2"):
+        return await a2_open(message)
+    if txt.startswith("/admin"):
+        return await admin_cmd(message)
     user = ensure(message.from_user)
     if user["blocked"]:
         return await message.answer("🚫 Заблокирован.")
     await message.answer("Используй /start.")
 
 
+
+
 # ============================================================
 # MAIN
 # ============================================================
+# ============================================================
+# ADMIN v3 — ЛИМИТЫ + ФУНКЦИИ
+# ============================================================
+
+class A3Limit(StatesGroup):
+    key = State()
+class A3Mass(StatesGroup):
+    mode = State(); amount = State()
+
+def a3_kb():
+    b = InlineKeyboardBuilder()
+    for t,d in [
+        ("⚙️ Лимиты игровые","a3lg:game"),
+        ("🎰 Лимиты казино","a3lg:casino"),
+        ("💰 Лимиты деньги","a3lg:money"),
+        ("⭐ Лимиты пакеты","a3lg:packs"),
+        ("🔀 Вкл/выкл","a3lg:toggles"),
+        ("📋 Показать все","a3l_showall"),
+        ("🔄 Сбросить всё","a3l_resetall"),
+        ("💰 Масса SD","a3_econ"),
+        ("🎯 Массовые","a3_mass"),
+        ("📁 Экспорт","a3_export"),
+        ("🛠 Диагностика","a3_diag"),
+        ("❌ Закрыть","a3_close"),
+    ]:
+        b.button(text=t, callback_data=d)
+    b.adjust(2,2,2,2,2,1,1)
+    return b.as_markup()
+
+def a3_cancel():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="a3_root")]])
+
+LIMIT_GROUPS = {
+    "game": [("starter_sd","Стартовый SD"),("daily_base","Daily"),
+             ("daily_streak_7","Стрик 7д"),("daily_streak_30","Стрик 30д"),
+             ("case_cooldown","Кулдаун кейсов"),("sell_commission","Комиссия продажи"),
+             ("upgrade_chance","Шанс апгрейда")],
+    "casino": [("casino_min","Мин ставка"),("casino_max","Макс ставка"),
+               ("casino_max_win","Макс выигрыш"),("casino_loss_limit","Лимит проигрыша"),
+               ("duel_min","Мин дуэли"),("duel_commission","Комиссия дуэли")],
+    "money": [("min_withdraw","Мин вывод"),("max_withdraw","Макс вывод"),
+              ("ref_invite","Бонус за реф"),("ref_donate","Бонус за донат")],
+    "packs": [("pack_100","Пакет 100"),("pack_400","Пакет 400"),
+              ("pack_1000","Пакет 1000"),("pack_1500","Пакет 1500")],
+    "toggles": [("registration_open","Регистрация"),("referral_enabled","Рефералы"),
+                ("casino_enabled","Казино"),("withdraw_enabled","Выводы"),
+                ("maintenance_mode","Обслуживание")],
+}
+
+@dp.message(Command("admin3"))
+async def a3_open(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    await message.answer("👑 <b>ADMIN v3</b>", reply_markup=a3_kb())
+
+@dp.callback_query(F.data == "a3_root")
+async def a3_root(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await callback.message.edit_text("👑 <b>ADMIN v3</b>", reply_markup=a3_kb())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3_close")
+async def a3_close(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    try: await callback.message.delete()
+    except Exception: pass
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("a3lg:"))
+async def a3_lg(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    grp = callback.data.split(":")[1]
+    b = InlineKeyboardBuilder()
+    for key, name in LIMIT_GROUPS.get(grp, []):
+        b.button(text=f"{name}: {get_limit(key)}", callback_data=f"a3le:{key}")
+    b.button(text="◀️ Назад", callback_data="a3_root")
+    b.adjust(1)
+    await callback.message.edit_text("⚙️ Выбери лимит:", reply_markup=b.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("a3le:"))
+async def a3_le(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    key = callback.data.split(":")[1]
+    await state.update_data(limit_key=key); await state.set_state(A3Limit.key)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Сброс к дефолту", callback_data=f"a3ld:{key}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="a2_root")]])
+    await callback.message.edit_text(
+        f"⚙️ <b>{key}</b>\n\nТекущее: <b>{get_limit(key)}</b>\n"
+        f"Дефолт: <b>{LIMIT_DEFAULTS.get(key)}</b>\n\n"
+        f"Отправь новое число или /a3d:",
+        reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("a3ld:"))
+async def a3_ld(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    key = callback.data.split(":")[1]
+    con = db(); con.execute("DELETE FROM settings WHERE key=?",(f"lim_{key}",)); con.commit(); con.close()
+    await callback.answer(f"✅ {key} → {LIMIT_DEFAULTS.get(key)}", show_alert=True)
+@dp.message(StateFilter(A3Limit.key))
+async def a3_le_save(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    data = await state.get_data()
+    key = data.get("limit_key")
+    txt = (message.text or "").strip()
+    if txt == "/a3d":
+        con = db()
+        con.execute("DELETE FROM settings WHERE key=?", (f"lim_{key}",))
+        con.commit(); con.close()
+        await state.clear()
+        return await message.answer(f"✅ {key} → default", reply_markup=a3_kb())
+    default = LIMIT_DEFAULTS.get(key)
+    try:
+        if isinstance(default, float): val = float(txt.replace(",", "."))
+        elif isinstance(default, int): val = int(txt)
+        else: val = txt
+    except Exception:
+        return await message.answer("❌ Неверный формат.")
+    set_limit(key, val)
+    log_admin("set_limit", details=f"{key}={val}")
+    await state.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎰 К лимитам казино", callback_data="a2g_limits")],
+        [InlineKeyboardButton(text="⚙️ Все лимиты", callback_data="a3_root")],
+        [InlineKeyboardButton(text="👑 В админку", callback_data="a2_root")]])
+    await message.answer(f"✅ {key} = <b>{val}</b>", reply_markup=kb)
+@dp.callback_query(F.data == "a3l_showall")
+async def a3_showall(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    txt = "📋 <b>ВСЕ ЛИМИТЫ</b>\n\n"
+    for grp, items in LIMIT_GROUPS.items():
+        txt += f"<b>{grp}</b>\n"
+        for k, n in items:
+            v = get_limit(k); d = LIMIT_DEFAULTS.get(k)
+            mark = "🟢" if v == d else "🟡"
+            txt += f"{mark} {n}: <b>{v}</b>\n"
+        txt += "\n"
+    await callback.message.edit_text(txt, reply_markup=a3_kb())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3l_resetall")
+async def a3_resetall(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    con = db()
+    n = con.execute("DELETE FROM settings WHERE key LIKE 'lim_%'").rowcount
+    con.commit(); con.close()
+    log_admin("reset_all_limits", details=str(n))
+    await callback.answer(f"✅ Сброшено {n} лимитов.", show_alert=True)
+
+@dp.callback_query(F.data == "a3_econ")
+async def a3_econ(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    con = db()
+    mass = con.execute("SELECT COALESCE(SUM(sd),0) n FROM users").fetchone()["n"]
+    rich = con.execute("SELECT COUNT(*) n FROM users WHERE sd>=10000").fetchone()["n"]
+    poor = con.execute("SELECT COUNT(*) n FROM users WHERE sd<100").fetchone()["n"]
+    con.close()
+    b = InlineKeyboardBuilder()
+    b.button(text="💣 Обнулить SD всем", callback_data="a3e_wipe")
+    b.button(text="🎁 Начислить всем", callback_data="a3e_add")
+    b.button(text="➖ Списать у всех", callback_data="a3e_take")
+    b.button(text="◀️ Назад", callback_data="a3_root")
+    b.adjust(1)
+    await callback.message.edit_text(
+        f"💰 <b>ЭКОНОМИКА</b>\n\nМасса SD: <b>{mass}</b>\n"
+        f"🐋 Богачей: {rich}\n🥚 Бедных: {poor}",
+        reply_markup=b.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3e_wipe")
+async def a3e_wipe(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ ДА", callback_data="a3e_wipe_ok")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="a3_root")]])
+    await callback.message.edit_text("⚠️ Обнулить SD у всех?", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3e_wipe_ok")
+async def a3e_wipe_ok(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    con = db()
+    con.execute("UPDATE users SET sd=0")
+    con.commit(); con.close()
+    log_admin("wipe_all_sd")
+    await callback.answer("✅ Обнулено.", show_alert=True)
+
+@dp.callback_query(F.data == "a3e_add")
+async def a3e_add(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.update_data(mode="add"); await state.set_state(A3Mass.amount)
+    await callback.message.edit_text("🎁 Сколько начислить всем?", reply_markup=a3_cancel())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3e_take")
+async def a3e_take(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.update_data(mode="take"); await state.set_state(A3Mass.amount)
+    await callback.message.edit_text("➖ Сколько списать у всех?", reply_markup=a3_cancel())
+    await callback.answer()
+
+@dp.message(StateFilter(A3Mass.amount))
+async def a3_mass_sd(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    try: amount = int(message.text)
+    except Exception: return await message.answer("❌")
+    data = await state.get_data(); mode = data.get("mode")
+    con = db()
+    if mode == "take":
+        con.execute("UPDATE users SET sd=MAX(0, sd-?)", (amount,))
+    else:
+        con.execute("UPDATE users SET sd=sd+?", (amount,))
+    con.commit(); con.close()
+    log_admin(f"mass_{mode}_sd", details=str(amount))
+    await state.clear()
+    await message.answer(f"✅ {mode} {amount} всем.", reply_markup=a3_kb())
+
+@dp.callback_query(F.data == "a3_mass")
+async def a3_mass(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    b = InlineKeyboardBuilder()
+    b.button(text="💎 Подписка всем донатерам", callback_data="a3m_sub")
+    b.button(text="🎁 Предмет всем активным", callback_data="a3m_item")
+    b.button(text="◀️ Назад", callback_data="a3_root")
+    b.adjust(1)
+    await callback.message.edit_text("🎯 <b>МАССОВЫЕ</b>", reply_markup=b.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3m_sub")
+async def a3m_sub(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    until = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    con = db()
+    n = con.execute("UPDATE users SET sub_until=? WHERE donated>0", (until,)).rowcount
+    con.commit(); con.close()
+    log_admin("mass_sub", details=str(n))
+    await callback.answer(f"✅ {n} юзеров получили подписку.", show_alert=True)
+
+@dp.callback_query(F.data == "a3m_item")
+async def a3m_item(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    con = db()
+    item = con.execute("SELECT id FROM items WHERE enabled=1 ORDER BY RANDOM() LIMIT 1").fetchone()
+    if not item: con.close(); return await callback.answer("Нет предметов.", show_alert=True)
+    users = con.execute("SELECT user_id FROM users WHERE last_activity >= ? AND blocked=0",
+                        (week_ago,)).fetchall()
+    for u in users:
+        con.execute("INSERT INTO inventory(user_id,item_id,obtained_at) VALUES(?,?,?)",
+                    (u["user_id"], item["id"], now()))
+    con.commit(); con.close()
+    log_admin("mass_item", details=f"item={item['id']} n={len(users)}")
+    await callback.answer(f"✅ {len(users)} юзеров получили предмет.", show_alert=True)
+
+@dp.callback_query(F.data == "a3_export")
+async def a3_export(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    con = db()
+    rows = con.execute("SELECT user_id,username,sd,xp,level,blocked FROM users").fetchall()
+    con.close()
+    path = "export_v3.csv"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("user_id,username,sd,xp,level,blocked\n")
+        for r in rows:
+            f.write(f"{r['user_id']},{r['username'] or ''},{r['sd']},{r['xp']},{r['level']},{r['blocked']}\n")
+    await callback.message.answer_document(FSInputFile(path), caption="📄 Экспорт")
+    await callback.answer()
+
+@dp.callback_query(F.data == "a3_diag")
+async def a3_diag(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    con = db()
+    tables = ["users","cases","items","inventory","case_opens","admin_logs",
+              "casino_bets","duels","withdraws","promo_codes","settings"]
+    txt = "🛠 <b>ДИАГНОСТИКА</b>\n\n"
+    for t in tables:
+        try:
+            n = con.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
+            txt += f"{t}: {n}\n"
+        except Exception as e:
+            txt += f"❌ {t}: {e}\n"
+    con.close()
+    txt += f"\nDB: <code>{DB_FILE}</code>"
+    await callback.message.edit_text(txt, reply_markup=a3_kb())
+    await callback.answer()
+
 
 async def main():
     init_db()
