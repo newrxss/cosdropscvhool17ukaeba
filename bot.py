@@ -378,10 +378,11 @@ def admin_kb():
 
 def casino_menu():
     b = InlineKeyboardBuilder()
-    for t,d in [("🎰 Слоты","cas_slots"),("🎲 Кости","cas_dice"),("🪙 Монетка","cas_coin"),
-        ("🎡 Рулетка","cas_roulette"),("💣 Мины","cas_mines"),("📊 Статистика","cas_stats"),
-        ("🏆 Топ","cas_top"),("◀️ Назад","home")]:
-        b.button(text=t,callback_data=d)
+    games = [("slots","🎰 Слоты","cas_slots"),("dice","🎲 Кости","cas_dice"),("coin","🪙 Монетка","cas_coin"),("roulette","🎡 Рулетка","cas_roulette"),("mines","💣 Мины","cas_mines")]
+    for key,text,cb in games:
+        if get_limit(f"casino_{key}_enabled"):
+            b.button(text=text,callback_data=cb)
+    b.button(text="📊 Статистика",callback_data="cas_stats"); b.button(text="🏆 Топ",callback_data="cas_top"); b.button(text="◀️ Назад",callback_data="home")
     b.adjust(2,2,2,1,1); return b.as_markup()
 
 def bet_kb(game):
@@ -729,22 +730,27 @@ def _apply_loss(uid,amount):
 
 @dp.callback_query(F.data == "cas_slots")
 async def cas_slots(callback: CallbackQuery):
+    if not get_limit("casino_slots_enabled"): return await callback.answer("Игра выключена.",show_alert=True)
     await callback.message.edit_text("🎰 <b>СЛОТЫ</b>\n\n🍒×3 · 🍋×4 · 🔔×6\n💎×12 · 7️⃣×25 · ⭐×50",reply_markup=bet_kb("slots")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_dice")
 async def cas_dice(callback: CallbackQuery):
+    if not get_limit("casino_dice_enabled"): return await callback.answer("Игра выключена.",show_alert=True)
     await callback.message.edit_text("🎲 <b>КОСТИ</b>\n\n<7 ×2 · >7 ×2 · =7 ×5",reply_markup=bet_kb("dice")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_coin")
 async def cas_coin(callback: CallbackQuery):
+    if not get_limit("casino_coin_enabled"): return await callback.answer("Игра выключена.",show_alert=True)
     await callback.message.edit_text("🪙 <b>МОНЕТКА</b> ×2",reply_markup=bet_kb("coin")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_roulette")
 async def cas_roulette(callback: CallbackQuery):
+    if not get_limit("casino_roulette_enabled"): return await callback.answer("Игра выключена.",show_alert=True)
     await callback.message.edit_text("🎡 <b>РУЛЕТКА</b>\n\n🔴 ×2 · ⚫ ×2 · 🟢 ×14",reply_markup=bet_kb("roulette")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_mines")
 async def cas_mines(callback: CallbackQuery):
+    if not get_limit("casino_mines_enabled"): return await callback.answer("Игра выключена.",show_alert=True)
     await callback.message.edit_text("💣 <b>МИНЫ</b>",reply_markup=bet_kb("mines")); await callback.answer()
 
 @dp.callback_query(F.data.startswith("bet:"))
@@ -804,10 +810,13 @@ async def _slots_spin(message,uid,bet):
         except Exception: return await bot.send_message(uid,"❌ Недостаточно SD.")
     frames = [[random.choice(SLOT_SYMBOLS) for _ in range(3)] for _ in range(8)]
     final = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
-    if random.random() < 0.20:
+    if random.random() < (get_limit("casino_slots_jackpot_chance") / 100):
         s = random.choice(SLOT_SYMBOLS); final = [s,s,s]
     frames.append(final)
-    mult = SLOT_PAYOUTS.get(tuple(final),0); win = min(bet*mult,get_limit("casino_max_win"))
+    mult = SLOT_PAYOUTS.get(tuple(final),0)
+    mult_override = {"🍒": get_limit("casino_slots_cherry"), "🍋": get_limit("casino_slots_lemon"), "🔔": get_limit("casino_slots_bell"), "💎": get_limit("casino_slots_diamond"), "7️⃣": get_limit("casino_slots_seven"), "⭐": get_limit("casino_slots_star")}
+    if len(set(final)) == 1: mult = mult_override.get(final[0], mult)
+    win = min(bet*mult,get_limit("casino_max_win"))
     if win > 0: add_sd(uid,win); _log_bet(uid,"slots",bet,win)
     else: _log_bet(uid,"slots",bet,0); _apply_loss(uid,bet)
     for f in frames:
@@ -827,9 +836,9 @@ async def dice_play(callback: CallbackQuery):
     if _check_loss_limit(callback.from_user.id,bet): return await callback.answer("Дневной лимит проигрыша.",show_alert=True)
     if not take_sd(callback.from_user.id,bet): return await callback.answer("Мало SD.",show_alert=True)
     a,b = random.randint(1,6),random.randint(1,6); total = a+b; win = 0
-    if ch == "lt" and total < 7: win = bet*2
-    elif ch == "gt" and total > 7: win = bet*2
-    elif ch == "eq" and total == 7: win = bet*5
+    if ch == "lt" and total < 7: win = bet*get_limit("casino_dice_low")
+    elif ch == "gt" and total > 7: win = bet*get_limit("casino_dice_high")
+    elif ch == "eq" and total == 7: win = bet*get_limit("casino_dice_seven")
     win = min(win,get_limit("casino_max_win"))
     if win > 0: add_sd(callback.from_user.id,win); _log_bet(callback.from_user.id,"dice",bet,win)
     else: _log_bet(callback.from_user.id,"dice",bet,0); _apply_loss(callback.from_user.id,bet)
@@ -843,7 +852,7 @@ async def coin_play(callback: CallbackQuery):
     _,ch,bet_s = callback.data.split(":"); bet = int(bet_s)
     if _check_loss_limit(callback.from_user.id,bet): return await callback.answer("Лимит.",show_alert=True)
     if not take_sd(callback.from_user.id,bet): return await callback.answer("Мало SD.",show_alert=True)
-    res = random.choice(["o","r"]); win = bet*2 if res == ch else 0
+    res = random.choice(["o","r"]); win = bet*get_limit("casino_coin_multiplier") if res == ch else 0
     if win > 0: add_sd(callback.from_user.id,win); _log_bet(callback.from_user.id,"coin",bet,win)
     else: _log_bet(callback.from_user.id,"coin",bet,0); _apply_loss(callback.from_user.id,bet)
     await check_achievements(callback.from_user.id); await bump_task(callback.from_user.id,"bet3",1)
@@ -861,7 +870,7 @@ async def roulette_play(callback: CallbackQuery):
     num = random.randint(0,36)
     color = "green" if num == 0 else ("red" if num in reds else "black")
     win = 0
-    if ch == color: win = bet*(14 if color == "green" else 2)
+    if ch == color: win = bet*(get_limit("casino_roulette_green_multiplier") if color == "green" else get_limit("casino_roulette_color_multiplier"))
     win = min(win,get_limit("casino_max_win"))
     if win > 0: add_sd(callback.from_user.id,win); _log_bet(callback.from_user.id,"roulette",bet,win)
     else: _log_bet(callback.from_user.id,"roulette",bet,0); _apply_loss(callback.from_user.id,bet)
@@ -1524,8 +1533,8 @@ async def admin_withdraws(callback: CallbackQuery):
 def a2_root_kb():
     b = InlineKeyboardBuilder()
     for t,d in [("📊 Статистика","a2_stats"),("👥 Юзеры","a2_users"),
-        ("📦 Кейсы","a2_cases"),("💎 Предметы","a2_items"),("🎟 Промо","a2_promo"),
-        ("🎰 Казино","a2_casino"),("📜 Логи","a2_logs"),("🛠 Сервис","a2_maint"),
+        ("📦 Кейсы","cdm_root"),("💎 Предметы","a2_items"),("🎟 Промо","a2_promo"),
+        ("🎰 Казино","cam_root"),("📜 Логи","a2_logs"),("🛠 Сервис","a2_maint"),
         ("📢 Рассылка","a2_broadcast"),("⚙️ Лимиты","a3_root"),
         ("💰 Экономика","a3_econ"),("🎯 Массовые","a3_mass"),
         ("📁 Экспорт","a3_export"),("🛠 Диагностика","a3_diag"),
@@ -2152,6 +2161,260 @@ async def a3_diag(callback: CallbackQuery):
         except Exception as e: txt += f"❌ {t}: {e}\n"
     con.close(); txt += f"\nDB: <code>{DB_FILE}</code>"
     await callback.message.edit_text(txt,reply_markup=a3_kb()); await callback.answer()
+
+# ============================================================
+# ADMIN CASE / ITEM / DROP / CASINO MANAGER
+# ============================================================
+class CaseCreateFSM(StatesGroup):
+    code=State(); name=State(); description=State(); price=State()
+class CaseEditFSM(StatesGroup): value=State()
+class DropChanceFSM(StatesGroup): value=State()
+class DropAddFSM(StatesGroup): value=State()
+class ItemCreateFSM(StatesGroup): code=State(); name=State(); rarity=State(); sell=State()
+class ItemEditFSM(StatesGroup): value=State()
+class CasinoSetFSM(StatesGroup): value=State()
+
+CASINO_MANAGER_DEFAULTS={
+    'casino_slots_enabled':1,'casino_dice_enabled':1,'casino_coin_enabled':1,
+    'casino_roulette_enabled':1,'casino_mines_enabled':1,
+    'casino_slots_jackpot_chance':20.0,'casino_slots_cherry':3,
+    'casino_slots_lemon':4,'casino_slots_bell':6,'casino_slots_diamond':12,
+    'casino_slots_seven':25,'casino_slots_star':50,
+    'casino_dice_low':2,'casino_dice_high':2,'casino_dice_seven':5,
+    'casino_coin_multiplier':2,'casino_roulette_color_multiplier':2,
+    'casino_roulette_green_multiplier':14,
+}
+_base_get_limit=get_limit
+def get_limit(key):
+    if key in CASINO_MANAGER_DEFAULTS:
+        default=CASINO_MANAGER_DEFAULTS[key]
+        try:
+            con=db(); row=con.execute('SELECT value FROM settings WHERE key=?',(f'lim_{key}',)).fetchone(); con.close()
+            if not row: return default
+            return float(row['value']) if isinstance(default,float) else int(row['value'])
+        except Exception: return default
+    return _base_get_limit(key)
+
+def adm_back(cb='a2_root'):
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='◀️ Назад',callback_data=cb)]])
+
+# ---------- CASES ----------
+@dp.callback_query(F.data=='cdm_root')
+async def cdm_root(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.clear(); con=db(); rows=con.execute('SELECT id,name,price,enabled FROM cases ORDER BY id').fetchall(); con.close()
+    b=InlineKeyboardBuilder()
+    for r in rows: b.button(text=f"{'🟢' if r['enabled'] else '🔴'} {r['name']} · {r['price']} SD",callback_data=f'cdm_view:{r["id"]}')
+    b.button(text='➕ Добавить кейс',callback_data='cdm_add'); b.button(text='◀️ Админка',callback_data='a2_root'); b.adjust(1)
+    await callback.message.edit_text('📦 <b>УПРАВЛЕНИЕ КЕЙСАМИ</b>\n\nВыбери кейс:',reply_markup=b.as_markup()); await callback.answer()
+
+@dp.callback_query(F.data.startswith('cdm_view:'))
+async def cdm_view(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    cid=int(callback.data.split(':')[1]); con=db(); c=con.execute('SELECT * FROM cases WHERE id=?',(cid,)).fetchone(); drops=con.execute('SELECT i.id,i.name,i.rarity,i.enabled,ci.chance FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=? ORDER BY ci.id',(cid,)).fetchall(); opens=con.execute('SELECT COUNT(*) n FROM case_opens WHERE case_id=?',(cid,)).fetchone()['n']; con.close()
+    if not c: return await callback.answer('Кейс не найден.',show_alert=True)
+    total=sum(float(x['chance']) for x in drops)
+    txt=f"📦 <b>{escape(c['name'])}</b>\n\n🆔 <code>{c['code']}</code>\n📝 {escape(c['description'] or '—')}\n💰 {c['price']} SD\nСтатус: {'🟢 включён' if c['enabled'] else '🔴 выключен'}\n🎁 Открытий: {opens}\n⚖️ Весов: <b>{total:g}</b>\n\n<b>Выпадения:</b>\n"
+    txt+='\n'.join(f"{'🟢' if x['enabled'] else '🔴'} {escape(x['name'])} — <b>{float(x['chance']):g}</b>" for x in drops) if drops else 'Нет предметов.'
+    b=InlineKeyboardBuilder(); b.button(text='✏️ Изменить',callback_data=f'cdm_edit:{cid}'); b.button(text='🎲 Выпадения',callback_data=f'cdm_drops:{cid}'); b.button(text='➕ Добавить предмет',callback_data=f'cdm_adddrop:{cid}'); b.button(text='🔴 Выключить' if c['enabled'] else '🟢 Включить',callback_data=f'cdm_toggle:{cid}'); b.button(text='🗑 Удалить',callback_data=f'cdm_del:{cid}'); b.button(text='◀️ К кейсам',callback_data='cdm_root'); b.adjust(1)
+    await callback.message.edit_text(txt,reply_markup=b.as_markup()); await callback.answer()
+
+@dp.callback_query(F.data=='cdm_add')
+async def cdm_add(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.set_state(CaseCreateFSM.code); await callback.message.edit_text('➕ <b>Новый кейс</b>\n\nВведи code, например <code>gold</code>:',reply_markup=adm_back('cdm_root')); await callback.answer()
+@dp.message(StateFilter(CaseCreateFSM.code))
+async def cdm_code(m:Message,state:FSMContext):
+    code=(m.text or '').strip().lower()
+    if not re.fullmatch(r'[a-z0-9_-]{2,32}',code): return await m.answer('❌ Только a-z, 0-9, _ и - (2-32 символа).')
+    con=db(); x=con.execute('SELECT 1 FROM cases WHERE code=?',(code,)).fetchone(); con.close()
+    if x:return await m.answer('❌ Такой code уже существует.')
+    await state.update_data(code=code); await state.set_state(CaseCreateFSM.name); await m.answer('Название:')
+@dp.message(StateFilter(CaseCreateFSM.name))
+async def cdm_name(m:Message,state:FSMContext): await state.update_data(name=(m.text or '').strip()[:100]); await state.set_state(CaseCreateFSM.description); await m.answer('Описание:')
+@dp.message(StateFilter(CaseCreateFSM.description))
+async def cdm_desc(m:Message,state:FSMContext): await state.update_data(description=(m.text or '').strip()[:300]); await state.set_state(CaseCreateFSM.price); await m.answer('Цена в SD:')
+@dp.message(StateFilter(CaseCreateFSM.price))
+async def cdm_price(m:Message,state:FSMContext):
+    try:p=int((m.text or '').strip())
+    except:return await m.answer('❌ Число.')
+    if p<0:return await m.answer('❌ Цена не может быть отрицательной.')
+    d=await state.get_data(); con=db(); cur=con.execute('INSERT INTO cases(code,name,description,price,enabled) VALUES(?,?,?,?,1)',(d['code'],d['name'],d['description'],p)); cid=cur.lastrowid; con.commit(); con.close(); await state.clear(); log_admin('create_case',details=f'{cid}:{d["code"]}'); await m.answer('✅ Кейс создан.',reply_markup=adm_back(f'cdm_view:{cid}'))
+
+@dp.callback_query(F.data.startswith('cdm_toggle:'))
+async def cdm_toggle(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    cid=int(callback.data.split(':')[1]); con=db(); r=con.execute('SELECT enabled FROM cases WHERE id=?',(cid,)).fetchone()
+    if not r:con.close();return await callback.answer('Нет.',show_alert=True)
+    nv=0 if r['enabled'] else 1; con.execute('UPDATE cases SET enabled=? WHERE id=?',(nv,cid)); con.commit(); con.close(); log_admin('toggle_case',details=f'{cid}={nv}'); await callback.answer('Изменено.',show_alert=True); await cdm_view(callback)
+
+@dp.callback_query(F.data.startswith('cdm_edit:'))
+async def cdm_edit(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    cid=int(callback.data.split(':')[1]); b=InlineKeyboardBuilder()
+    for k,n in [('name','🏷 Название'),('description','📝 Описание'),('price','💰 Цена')]:b.button(text=n,callback_data=f'cdme:{cid}:{k}')
+    b.button(text='◀️ Назад',callback_data=f'cdm_view:{cid}'); b.adjust(1); await callback.message.edit_text('✏️ Выбери поле:',reply_markup=b.as_markup()); await callback.answer()
+@dp.callback_query(F.data.startswith('cdme:'))
+async def cdme(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    _,cid,key=callback.data.split(':',2); await state.update_data(cid=int(cid),key=key); await state.set_state(CaseEditFSM.value); await callback.message.edit_text(f'Введи новое значение для <b>{key}</b>:',reply_markup=adm_back(f'cdm_view:{cid}')); await callback.answer()
+@dp.message(StateFilter(CaseEditFSM.value))
+async def cdme_save(m:Message,state:FSMContext):
+    d=await state.get_data(); key=d['key']; val=(m.text or '').strip()
+    if key=='price':
+        try:val=int(val)
+        except:return await m.answer('❌ Число.')
+        if val<0:return await m.answer('❌ Нельзя меньше 0.')
+    else:val=val[:300]
+    con=db(); con.execute(f'UPDATE cases SET {key}=? WHERE id=?',(val,d['cid'])); con.commit(); con.close(); await state.clear(); log_admin('edit_case',details=f'{d["cid"]}:{key}={val}'); await m.answer('✅ Сохранено.',reply_markup=adm_back(f'cdm_view:{d["cid"]}'))
+
+@dp.callback_query(F.data.startswith('cdm_del:'))
+async def cdm_del(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    cid=int(callback.data.split(':')[1]); con=db(); n=con.execute('SELECT COUNT(*) n FROM case_opens WHERE case_id=?',(cid,)).fetchone()['n']; c=con.execute('SELECT name FROM cases WHERE id=?',(cid,)).fetchone(); con.close()
+    if not c:return await callback.answer('Нет.',show_alert=True)
+    if n:return await callback.answer(f'Нельзя удалить: уже {n} открытий. Выключи кейс.',show_alert=True)
+    con=db();con.execute('DELETE FROM case_items WHERE case_id=?',(cid,));con.execute('DELETE FROM cases WHERE id=?',(cid,));con.commit();con.close();log_admin('delete_case',details=str(cid));await callback.answer('Удалено.',show_alert=True);await cdm_root(callback)
+
+# ---------- DROPS ----------
+@dp.callback_query(F.data.startswith('cdm_drops:'))
+async def cdm_drops(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    cid=int(callback.data.split(':')[1]);con=db();c=con.execute('SELECT name FROM cases WHERE id=?',(cid,)).fetchone();rows=con.execute('SELECT i.id,i.name,ci.chance FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=? ORDER BY ci.id',(cid,)).fetchall();con.close()
+    if not c:return await callback.answer('Нет.',show_alert=True)
+    total=sum(float(r['chance']) for r in rows);b=InlineKeyboardBuilder()
+    for r in rows:b.button(text=f'{r["name"]}: {float(r["chance"]):g}',callback_data=f'cdmd:{cid}:{r["id"]}')
+    b.button(text='➕ Добавить',callback_data=f'cdm_adddrop:{cid}');b.button(text='🧹 Очистить',callback_data=f'cdm_clear:{cid}');b.button(text='◀️ Назад',callback_data=f'cdm_view:{cid}');b.adjust(1)
+    await callback.message.edit_text(f'🎲 <b>{escape(c["name"])}</b>\n\nСумма весов: <b>{total:g}</b>\nНажми предмет и задай новый вес. Сумма может быть не ровно 100 — random.choices нормализует веса.',reply_markup=b.as_markup());await callback.answer()
+@dp.callback_query(F.data.startswith('cdmd:'))
+async def cdmd(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    _,cid,iid=callback.data.split(':');con=db();r=con.execute('SELECT i.name,ci.chance FROM case_items ci JOIN items i ON i.id=ci.item_id WHERE ci.case_id=? AND ci.item_id=?',(int(cid),int(iid))).fetchone();con.close()
+    if not r:return await callback.answer('Нет.',show_alert=True)
+    await state.update_data(cid=int(cid),iid=int(iid));await state.set_state(DropChanceFSM.value);await callback.message.edit_text(f'🎲 {escape(r["name"])}\nТекущий вес: <b>{float(r["chance"]):g}</b>\n\nВведи новый вес:',reply_markup=adm_back(f'cdm_drops:{cid}'));await callback.answer()
+@dp.message(StateFilter(DropChanceFSM.value))
+async def cdmd_save(m:Message,state:FSMContext):
+    try:v=float((m.text or '').replace(',','.'))
+    except:return await m.answer('❌ Число.')
+    if v<0:return await m.answer('❌ Не может быть отрицательным.')
+    d=await state.get_data();con=db();con.execute('UPDATE case_items SET chance=? WHERE case_id=? AND item_id=?',(v,d['cid'],d['iid']));con.commit();con.close();await state.clear();log_admin('change_drop',details=f'{d["cid"]}:{d["iid"]}={v}');await m.answer('✅ Вес изменён.',reply_markup=adm_back(f'cdm_drops:{d["cid"]}'))
+@dp.callback_query(F.data.startswith('cdm_adddrop:'))
+async def cdm_adddrop(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    cid=int(callback.data.split(':')[1]);con=db();rows=con.execute('SELECT id,name,rarity FROM items WHERE enabled=1 AND id NOT IN (SELECT item_id FROM case_items WHERE case_id=?) ORDER BY id',(cid,)).fetchall();con.close();b=InlineKeyboardBuilder()
+    for r in rows:b.button(text=f'{r["name"]} · {RARITY.get(r["rarity"],"⚪")}',callback_data=f'cdmp:{cid}:{r["id"]}')
+    b.button(text='◀️ Назад',callback_data=f'cdm_view:{cid}');b.adjust(1);await callback.message.edit_text('➕ Выбери предмет:',reply_markup=b.as_markup());await callback.answer()
+@dp.callback_query(F.data.startswith('cdmp:'))
+async def cdmp(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    _,cid,iid=callback.data.split(':');await state.update_data(cid=int(cid),iid=int(iid));await state.set_state(DropAddFSM.value);await callback.message.edit_text('Введи вес/шанс:',reply_markup=adm_back(f'cdm_drops:{cid}'));await callback.answer()
+@dp.message(StateFilter(DropAddFSM.value))
+async def cdmp_save(m:Message,state:FSMContext):
+    try:v=float((m.text or '').replace(',','.'))
+    except:return await m.answer('❌ Число.')
+    if v<=0:return await m.answer('❌ Должно быть больше 0.')
+    d=await state.get_data();con=db();con.execute('INSERT OR REPLACE INTO case_items(case_id,item_id,chance) VALUES(?,?,?)',(d['cid'],d['iid'],v));con.commit();con.close();await state.clear();log_admin('add_drop',details=f'{d["cid"]}:{d["iid"]}={v}');await m.answer('✅ Добавлено.',reply_markup=adm_back(f'cdm_drops:{d["cid"]}'))
+@dp.callback_query(F.data.startswith('cdm_clear:'))
+async def cdm_clear(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    cid=int(callback.data.split(':')[1]);con=db();con.execute('DELETE FROM case_items WHERE case_id=?',(cid,));con.commit();con.close();await callback.answer('Очищено.',show_alert=True);await cdm_drops(callback)
+
+# ---------- ITEMS ----------
+@dp.callback_query(F.data=='idm_root')
+async def idm_root(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.clear();con=db();rows=con.execute('SELECT id,name,rarity,sell_price,enabled FROM items ORDER BY id').fetchall();con.close();b=InlineKeyboardBuilder()
+    for r in rows:b.button(text=f"{'🟢' if r['enabled'] else '🔴'} {r['name']} · {r['sell_price']}",callback_data=f'idmv:{r["id"]}')
+    b.button(text='➕ Добавить предмет',callback_data='idm_add');b.button(text='◀️ Админка',callback_data='a2_root');b.adjust(1);await callback.message.edit_text('💎 <b>ПРЕДМЕТЫ</b>',reply_markup=b.as_markup());await callback.answer()
+@dp.callback_query(F.data.startswith('idmv:'))
+async def idmv(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    iid=int(callback.data.split(':')[1]);con=db();r=con.execute('SELECT * FROM items WHERE id=?',(iid,)).fetchone();con.close()
+    if not r:return await callback.answer('Нет.',show_alert=True)
+    b=InlineKeyboardBuilder();b.button(text='✏️ Название',callback_data=f'idme:{iid}:name');b.button(text='🏷 Редкость',callback_data=f'idme:{iid}:rarity');b.button(text='💰 Продажа',callback_data=f'idme:{iid}:sell_price');b.button(text='🔴 Выключить' if r['enabled'] else '🟢 Включить',callback_data=f'idmt:{iid}');b.button(text='🗑 Удалить',callback_data=f'idmd:{iid}');b.button(text='◀️ Назад',callback_data='idm_root');b.adjust(1)
+    await callback.message.edit_text(f"💎 <b>{escape(r['name'])}</b>\n\nCode: <code>{r['code']}</code>\nРедкость: {RARITY.get(r['rarity'],'⚪')}\nПродажа: {r['sell_price']} SD\nСтатус: {'🟢 включён' if r['enabled'] else '🔴 выключен'}",reply_markup=b.as_markup());await callback.answer()
+@dp.callback_query(F.data=='idm_add')
+async def idm_add(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.set_state(ItemCreateFSM.code);await callback.message.edit_text('➕ Code предмета:',reply_markup=adm_back('idm_root'));await callback.answer()
+@dp.message(StateFilter(ItemCreateFSM.code))
+async def idm_code(m:Message,state:FSMContext):
+    code=(m.text or '').strip().lower()
+    if not re.fullmatch(r'[a-z0-9_-]{2,40}',code):return await m.answer('❌ Неверный code.')
+    con=db();x=con.execute('SELECT 1 FROM items WHERE code=?',(code,)).fetchone();con.close()
+    if x:return await m.answer('❌ Уже существует.')
+    await state.update_data(code=code);await state.set_state(ItemCreateFSM.name);await m.answer('Название:')
+@dp.message(StateFilter(ItemCreateFSM.name))
+async def idm_name(m:Message,state:FSMContext):await state.update_data(name=(m.text or '').strip()[:100]);await state.set_state(ItemCreateFSM.rarity);await m.answer('Редкость: common / rare / epic / legendary / mythic')
+@dp.message(StateFilter(ItemCreateFSM.rarity))
+async def idm_rarity(m:Message,state:FSMContext):
+    r=(m.text or '').strip().lower()
+    if r not in RARITY:return await m.answer('❌ Неверная редкость.')
+    await state.update_data(rarity=r);await state.set_state(ItemCreateFSM.sell);await m.answer('Цена продажи SD:')
+@dp.message(StateFilter(ItemCreateFSM.sell))
+async def idm_sell(m:Message,state:FSMContext):
+    try:v=int((m.text or '').strip())
+    except:return await m.answer('❌ Число.')
+    d=await state.get_data();con=db();cur=con.execute('INSERT INTO items(code,name,rarity,sell_price,enabled) VALUES(?,?,?,?,1)',(d['code'],d['name'],d['rarity'],v));iid=cur.lastrowid;con.commit();con.close();await state.clear();log_admin('create_item',details=f'{iid}:{d["code"]}');await m.answer('✅ Предмет создан.',reply_markup=adm_back(f'idmv:{iid}'))
+@dp.callback_query(F.data.startswith('idme:'))
+async def idme(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    _,iid,key=callback.data.split(':',2);await state.update_data(iid=int(iid),key=key);await state.set_state(ItemEditFSM.value);await callback.message.edit_text(f'Новое значение <b>{key}</b>:',reply_markup=adm_back(f'idmv:{iid}'));await callback.answer()
+@dp.message(StateFilter(ItemEditFSM.value))
+async def idme_save(m:Message,state:FSMContext):
+    d=await state.get_data();key=d['key'];v=(m.text or '').strip()
+    if key=='sell_price':
+        try:v=int(v)
+        except:return await m.answer('❌ Число.')
+    elif key=='rarity':
+        v=v.lower()
+        if v not in RARITY:return await m.answer('❌ Неверная редкость.')
+    v=v[:100] if key=='name' else v;con=db();con.execute(f'UPDATE items SET {key}=? WHERE id=?',(v,d['iid']));con.commit();con.close();await state.clear();await m.answer('✅ Сохранено.',reply_markup=adm_back(f'idmv:{d["iid"]}'))
+@dp.callback_query(F.data.startswith('idmt:'))
+async def idmt(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    iid=int(callback.data.split(':')[1]);con=db();r=con.execute('SELECT enabled FROM items WHERE id=?',(iid,)).fetchone();nv=0 if r['enabled'] else 1;con.execute('UPDATE items SET enabled=? WHERE id=?',(nv,iid));con.commit();con.close();await callback.answer('Изменено.',show_alert=True);await idmv(callback)
+@dp.callback_query(F.data.startswith('idmd:'))
+async def idmd(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    iid=int(callback.data.split(':')[1]);con=db();inv=con.execute('SELECT COUNT(*) n FROM inventory WHERE item_id=?',(iid,)).fetchone()['n']
+    if inv:con.execute('UPDATE items SET enabled=0 WHERE id=?',(iid,));con.execute('DELETE FROM case_items WHERE item_id=?',(iid,));msg='🔴 Отключён: предмет уже есть у игроков.'
+    else:con.execute('DELETE FROM case_items WHERE item_id=?',(iid,));con.execute('DELETE FROM items WHERE id=?',(iid,));msg='🗑 Удалён.'
+    con.commit();con.close();log_admin('delete_item',details=str(iid));await callback.answer(msg,show_alert=True);await idm_root(callback)
+
+# ---------- CASINO ----------
+def cam_kb():
+    b=InlineKeyboardBuilder()
+    for k,n in [('slots','🎰 Слоты'),('dice','🎲 Кости'),('coin','🪙 Монетка'),('roulette','🎡 Рулетка'),('mines','💣 Мины')]:b.button(text=f"{'🟢' if get_limit('casino_'+k+'_enabled') else '🔴'} {n}",callback_data=f'cam_t:{k}')
+    for k,n in [('cam_slots','🎰 Настройки слотов'),('cam_dice','🎲 Настройки костей'),('cam_coin','🪙 Настройки монетки'),('cam_roulette','🎡 Настройки рулетки')]:b.button(text=n,callback_data=k)
+    b.button(text='💵 Общие лимиты',callback_data='a2g_limits');b.button(text='◀️ Админка',callback_data='a2_root');b.adjust(1,1,1,1,1,1,1,1,1,2,1);return b.as_markup()
+@dp.callback_query(F.data=='cam_root')
+async def cam_root(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.clear();await callback.message.edit_text('🎰 <b>УПРАВЛЕНИЕ КАЗИНО</b>\n\nВключение/выключение игр и настройка множителей.',reply_markup=cam_kb());await callback.answer()
+@dp.callback_query(F.data.startswith('cam_t:'))
+async def cam_t(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    k=callback.data.split(':')[1];key='casino_'+k+'_enabled';set_limit(key,0 if get_limit(key) else 1);log_admin('casino_toggle',details=f'{k}={get_limit(key)}');await callback.answer('Изменено.',show_alert=True);await cam_root(callback)
+CAM_FIELDS={'cam_slots':[('casino_slots_jackpot_chance','Шанс 3 одинаковых (%)'),('casino_slots_cherry','🍒 множитель'),('casino_slots_lemon','🍋 множитель'),('casino_slots_bell','🔔 множитель'),('casino_slots_diamond','💎 множитель'),('casino_slots_seven','7️⃣ множитель'),('casino_slots_star','⭐ множитель')],'cam_dice':[('casino_dice_low','<7 множитель'),('casino_dice_high','>7 множитель'),('casino_dice_seven','=7 множитель')],'cam_coin':[('casino_coin_multiplier','Монетка множитель')],'cam_roulette':[('casino_roulette_color_multiplier','🔴⚫ множитель'),('casino_roulette_green_multiplier','🟢 множитель')]}
+@dp.callback_query(F.data.in_({'cam_slots','cam_dice','cam_coin','cam_roulette'}))
+async def cam_settings(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    fields=CAM_FIELDS[callback.data];b=InlineKeyboardBuilder()
+    for k,n in fields:b.button(text=f'{n}: {get_limit(k)}',callback_data=f'cams:{k}')
+    b.button(text='◀️ Назад',callback_data='cam_root');b.adjust(1);await callback.message.edit_text('⚙️ <b>НАСТРОЙКИ КАЗИНО</b>\n\nВыбери параметр:',reply_markup=b.as_markup());await callback.answer()
+@dp.callback_query(F.data.startswith('cams:'))
+async def cams(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    key=callback.data.split(':',1)[1];await state.update_data(key=key);await state.set_state(CasinoSetFSM.value);await callback.message.edit_text(f'⚙️ <b>{key}</b>\n\nТекущее: <b>{get_limit(key)}</b>\n\nВведи новое число:',reply_markup=adm_back('cam_root'));await callback.answer()
+@dp.message(StateFilter(CasinoSetFSM.value))
+async def cams_save(m:Message,state:FSMContext):
+    d=await state.get_data();key=d['key'];default=CASINO_MANAGER_DEFAULTS[key]
+    try:v=float((m.text or '').replace(',','.')) if isinstance(default,float) else int((m.text or '').strip())
+    except:return await m.answer('❌ Число.')
+    if 'chance' in key and not 0<=v<=100:return await m.answer('❌ Шанс: 0-100.')
+    if v<0:return await m.answer('❌ Не может быть отрицательным.')
+    set_limit(key,v);await state.clear();log_admin('casino_setting',details=f'{key}={v}');await m.answer(f'✅ {key} = <b>{v}</b>',reply_markup=adm_back('cam_root'))
 
 # ========== FALLBACK ==========
 @dp.message(StateFilter(None))
