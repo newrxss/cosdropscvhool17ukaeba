@@ -1780,10 +1780,18 @@ async def a2u_tb(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("a2u_rst:"))
 async def a2u_rst(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
-    uid = int(callback.data.split(":")[1]); con = db()
-    con.execute("UPDATE users SET sd=0, xp=0, level=1 WHERE user_id=?",(uid,))
-    con.execute("DELETE FROM inventory WHERE user_id=?",(uid,)); con.commit(); con.close()
-    log_admin("reset_user",uid); await callback.answer("✅ Сброшено.",show_alert=True)
+    uid = int(callback.data.split(":")[1]); starter_sd = int(get_limit("starter_sd")); con = db()
+    con.execute("""UPDATE users SET sd=?, xp=0, level=1, last_activity=NULL,
+        daily_claim=NULL, daily_streak=0, last_case_at=NULL, referrer_id=NULL,
+        donated=0, sub_until=NULL, daily_loss=0, daily_loss_date=NULL, tag=NULL
+        WHERE user_id=?""", (starter_sd,uid))
+    for table in ("inventory","case_opens","casino_bets","casino_stats","duels","user_achievements","user_tasks","promo_uses","withdraws","applications"):
+        try:
+            con.execute(f"DELETE FROM {table} WHERE user_id=?",(uid,))
+        except Exception:
+            pass
+    con.commit(); con.close()
+    log_admin("reset_user",uid,str(starter_sd)); await callback.answer("✅ Игрок сброшен, аккаунт сохранён.",show_alert=True)
 
 @dp.callback_query(F.data.startswith("a2u_msgto:"))
 async def a2u_msgto(callback: CallbackQuery, state: FSMContext):
@@ -1830,13 +1838,22 @@ async def a2u_reset(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(StateFilter(A2Reset.uid))
 async def a2u_reset_do(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
     try: uid = int(message.text)
-    except Exception: return
-    con = db()
-    con.execute("UPDATE users SET sd=0, xp=0, level=1 WHERE user_id=?",(uid,))
-    con.execute("DELETE FROM inventory WHERE user_id=?",(uid,)); con.commit(); con.close()
-    log_admin("reset_user",uid); await state.clear()
-    await message.answer(f"🗑 {uid}.",reply_markup=a2_root_kb())
+    except Exception: return await message.answer("❌ Нужен Telegram ID.")
+    starter_sd = int(get_limit("starter_sd")); con = db()
+    con.execute("""UPDATE users SET sd=?, xp=0, level=1, last_activity=NULL,
+        daily_claim=NULL, daily_streak=0, last_case_at=NULL, referrer_id=NULL,
+        donated=0, sub_until=NULL, daily_loss=0, daily_loss_date=NULL, tag=NULL
+        WHERE user_id=?""", (starter_sd,uid))
+    for table in ("inventory","case_opens","casino_bets","casino_stats","duels","user_achievements","user_tasks","promo_uses","withdraws","applications"):
+        try:
+            con.execute(f"DELETE FROM {table} WHERE user_id=?",(uid,))
+        except Exception:
+            pass
+    con.commit(); con.close()
+    log_admin("reset_user",uid,str(starter_sd)); await state.clear()
+    await message.answer(f"🗑 Игрок <code>{uid}</code> сброшен. Аккаунт сохранён.",reply_markup=a2_root_kb())
 
 @dp.callback_query(F.data == "a2u_export")
 async def a2u_export(callback: CallbackQuery):
@@ -1852,8 +1869,15 @@ async def a2u_export(callback: CallbackQuery):
 async def a2_cases(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT id,name,price,enabled FROM cases ORDER BY id").fetchall(); con.close()
-    txt = "📦 <b>КЕЙСЫ</b>\n\n"+"\n".join(f"{'🟢' if r['enabled'] else '🔴'} {r['name']} · {r['price']}" for r in rows)
-    await callback.message.edit_text(txt,reply_markup=a2_root_kb()); await callback.answer()
+    txt = "📦 <b>КЕЙСЫ</b>\n\n" + "\n".join(
+        f"{'🟢' if r['enabled'] else '🔴'} <b>{escape(r['name'])}</b> · {r['price']} SD" for r in rows
+    ) or "Пусто."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Вкл/выкл кейс", callback_data="case_toggle_start")],
+        [InlineKeyboardButton(text="💰 Изменить цену", callback_data="case_price_start")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="a2_root")],
+    ])
+    await callback.message.edit_text(txt,reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "a2_items")
 async def a2_items(callback: CallbackQuery):
@@ -2044,36 +2068,73 @@ async def a2_wipe(callback: CallbackQuery):
 @dp.callback_query(F.data == "a2_wipe_confirm")
 async def a2_wipe_confirm(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
+
+    # ВАЖНО: пользователей НЕ удаляем. Их Telegram ID/аккаунты остаются в users,
+    # поэтому список пользователей, поиск и рассылка продолжают работать.
+    # Сбрасываем только игровой прогресс. Кейсы, предметы, их настройки и
+    # настройки экономики/казино не трогаем. Администратор тоже сохраняется.
     con = db()
-    tables = [
-        "inventory", "case_opens", "applications", "promo_uses", "withdraws",
-        "casino_bets", "casino_stats", "duels", "user_achievements", "user_tasks"
-    ]
-    counts = {}
+    starter_sd = int(get_limit("starter_sd"))
     try:
-        for table in tables:
+        counts = {}
+        for table in (
+            "inventory", "case_opens", "applications", "promo_uses", "withdraws",
+            "casino_bets", "casino_stats", "duels", "user_achievements", "user_tasks"
+        ):
             counts[table] = con.execute(f"SELECT COUNT(*) n FROM {table}").fetchone()["n"]
             con.execute(f"DELETE FROM {table}")
-        counts["users"] = con.execute("SELECT COUNT(*) n FROM users WHERE user_id != ?", (ADMIN_ID,)).fetchone()["n"]
-        con.execute("DELETE FROM users WHERE user_id != ?", (ADMIN_ID,))
+
+        # Сохраняем сами аккаунты, username/имя, дату регистрации и блокировки.
+        # Админские права не хранятся в users, а отдельная таблица admins не трогается.
+        player_count = con.execute(
+            "SELECT COUNT(*) n FROM users WHERE user_id != ?", (ADMIN_ID,)
+        ).fetchone()["n"]
+
+        con.execute("""
+            UPDATE users SET
+                sd=?,
+                xp=0,
+                level=1,
+                last_activity=NULL,
+                daily_claim=NULL,
+                daily_streak=0,
+                last_case_at=NULL,
+                referrer_id=NULL,
+                donated=0,
+                sub_until=NULL,
+                daily_loss=0,
+                daily_loss_date=NULL,
+                tag=NULL
+            WHERE user_id != ?
+        """, (starter_sd, ADMIN_ID))
         con.commit()
     except Exception:
         con.rollback()
         con.close()
         raise
     con.close()
-    log_admin("FULL_WIPE", details=f"deleted_users={counts.get('users',0)}")
+
+    log_admin("FULL_WIPE_PROGRESS", details=f"players_reset={player_count};starter_sd={starter_sd}")
     await callback.message.edit_text(
-        "☢️ <b>WIPE ЗАВЕРШЁН</b>\n\n"
-        f"👥 Удалено игроков: <b>{counts.get('users',0)}</b>\n"
-        "💰 Балансы сброшены вместе с аккаунтами\n"
+        "☢️ <b>СБРОС ИГРОКОВ ЗАВЕРШЁН</b>\n\n"
+        f"👥 Сброшено игроков: <b>{player_count}</b>\n"
+        f"💰 Баланс → <b>{starter_sd} SD</b>\n"
         "🎒 Коллекции очищены\n"
-        "🎰 Статистика очищена\n"
-        "🏅 Достижения и задания очищены\n\n"
-        "✅ Система COS-DROP и администратор сохранены.",
+        "⭐ XP и уровень → 0 / 1\n"
+        "🎁 История открытий кейсов очищена\n"
+        "🎰 Ставки и статистика казино очищены\n"
+        "⚔️ Дуэли очищены\n"
+        "🏅 Достижения очищены\n"
+        "📋 Задания очищены\n"
+        "🎟 Использованные промокоды очищены\n"
+        "💸 Выводы очищены\n\n"
+        "✅ <b>Аккаунты игроков НЕ удалены.</b>\n"
+        "✅ Пользователи остались в списке и снова получают рассылки.\n"
+        "✅ Кейсы, предметы, цены и настройки казино сохранены.\n"
+        "👑 Администратор сохранён.",
         reply_markup=a2_root_kb(),
     )
-    await callback.answer("☢️ Полный wipe выполнен")
+    await callback.answer("☢️ Прогресс игроков сброшен")
 
 @dp.callback_query(F.data == "a2_broadcast")
 async def a2_broadcast(callback: CallbackQuery, state: FSMContext):
