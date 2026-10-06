@@ -11,13 +11,15 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-BOT_TOKEN = "8835340993:AAHSTFMcY5pJ5VK2mrDAf9bW_MWFgRoxKLU"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = 8146320391
-DB_FILE = "cosdrop.sqlite3"
+DB_FILE = os.getenv("DB_FILE", "/data/cosdrop.sqlite3" if os.path.isdir("/data") else "cosdrop.sqlite3")
 IMAGE_FILE = "imagemain.png"
-BACKUP_DIR = "backups"
+BACKUP_DIR = os.getenv("BACKUP_DIR", "/data/backups" if os.path.isdir("/data") else "backups")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set. Add BOT_TOKEN in Railway Variables.")
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
@@ -297,24 +299,6 @@ def init_db():
     con.commit()
     # ========== КОНЕЦ МИГРАЦИИ ==========
 
-    cur.execute("INSERT OR IGNORE INTO admins(user_id,role,created_at) VALUES(?,?,?)",(ADMIN_ID,"owner",now()))
-    for c,n,d,p in CASES: cur.execute("INSERT OR IGNORE INTO cases(code,name,description,price) VALUES(?,?,?,?)",(c,n,d,p))
-    for c,n,r,p in ITEMS: cur.execute("INSERT OR IGNORE INTO items(code,name,rarity,sell_price) VALUES(?,?,?,?)",(c,n,r,p))
-    for cc,drops in DROPS.items():
-        cr = cur.execute("SELECT id FROM cases WHERE code=?",(cc,)).fetchone()
-        if not cr: continue
-        for ic,ch in drops:
-            ir = cur.execute("SELECT id FROM items WHERE code=?",(ic,)).fetchone()
-            if ir: cur.execute("INSERT OR IGNORE INTO case_items(case_id,item_id,chance) VALUES(?,?,?)",(cr["id"],ir["id"],ch))
-    for a in [("first_case","🎁 Первый кейс","Открыть кейс",50),("ten_cases","🔥 10 кейсов","10 открытий",150),
-              ("hundred_cases","💎 100 кейсов","100 открытий",500),("collector","🎒 Коллекционер","10 предметов",250),
-              ("rich","💰 Богатый","5000 SD",500),("casino_king","🎰 Король","100 ставок",1000),
-              ("duelist","⚔️ Дуэлянт","5 побед",400),("referrer","🤝 Вербовщик","3 реферала",750)]:
-        cur.execute("INSERT OR IGNORE INTO achievements(code,name,description,reward) VALUES(?,?,?,?)",a)
-    for t in [("open5","🎁 Открой 5 кейсов","5 кейсов",5,200),("bet3","🎰 3 ставки","3 ставки",3,150),
-              ("win1","🏆 Победа","Выиграть",1,250),("daily","📅 Зайти","Заход",1,50)]:
-        cur.execute("INSERT OR IGNORE INTO tasks(code,name,description,goal,reward) VALUES(?,?,?,?,?)",t)
-    con.commit(); con.close()
     cur.execute("INSERT OR IGNORE INTO admins(user_id,role,created_at) VALUES(?,?,?)",(ADMIN_ID,"owner",now()))
     for c,n,d,p in CASES: cur.execute("INSERT OR IGNORE INTO cases(code,name,description,price) VALUES(?,?,?,?)",(c,n,d,p))
     for c,n,r,p in ITEMS: cur.execute("INSERT OR IGNORE INTO items(code,name,rarity,sell_price) VALUES(?,?,?,?)",(c,n,r,p))
