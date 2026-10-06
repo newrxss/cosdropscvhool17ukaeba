@@ -11,7 +11,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-BOT_TOKEN = "8835340993:AAFRQwvyG-PoyMP_Rcb6qVx6IVQ8S5VyjII"
+BOT_TOKEN = "8984416350:AAG6y9BXwwEud5R3LfcPHniCfhr744tHefk"
 ADMIN_ID = 8146320391
 DB_FILE = "cosdrop.sqlite3"
 IMAGE_FILE = "imagemain.png"
@@ -175,6 +175,72 @@ def init_db():
         opponent_id INTEGER, amount INTEGER, status TEXT DEFAULT 'pending', winner_id INTEGER,
         created_at TEXT, finished_at TEXT);
     """)
+
+    # ========== МИГРАЦИЯ (добавляет недостающие колонки) ==========
+    def _cols(table):
+        try:
+            return {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+        except Exception:
+            return set()
+
+    # users
+    u_cols = _cols("users")
+    for col, ddl in [
+        ("referrer_id", "INTEGER"), ("donated", "INTEGER DEFAULT 0"),
+        ("sub_until", "TEXT"), ("daily_streak", "INTEGER DEFAULT 0"),
+        ("daily_loss", "INTEGER DEFAULT 0"), ("daily_loss_date", "TEXT"),
+        ("tag", "TEXT"), ("last_case_at", "TEXT"),
+    ]:
+        if col not in u_cols:
+            try: cur.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+            except Exception: pass
+
+    # items
+    i_cols = _cols("items")
+    if "sell_price" not in i_cols:
+        try: cur.execute("ALTER TABLE items ADD COLUMN sell_price INTEGER DEFAULT 0")
+        except Exception: pass
+    if "enabled" not in i_cols:
+        try: cur.execute("ALTER TABLE items ADD COLUMN enabled INTEGER DEFAULT 1")
+        except Exception: pass
+
+    # cases
+    c_cols = _cols("cases")
+    if "enabled" not in c_cols:
+        try: cur.execute("ALTER TABLE cases ADD COLUMN enabled INTEGER DEFAULT 1")
+        except Exception: pass
+
+    # если sell_price пустой — проставим цены
+    try:
+        cur.execute("UPDATE items SET sell_price = 50 WHERE (sell_price IS NULL OR sell_price = 0) AND rarity='common'")
+        cur.execute("UPDATE items SET sell_price = 150 WHERE (sell_price IS NULL OR sell_price = 0) AND rarity='rare'")
+        cur.execute("UPDATE items SET sell_price = 500 WHERE (sell_price IS NULL OR sell_price = 0) AND rarity='epic'")
+        cur.execute("UPDATE items SET sell_price = 1500 WHERE (sell_price IS NULL OR sell_price = 0) AND rarity='legendary'")
+        cur.execute("UPDATE items SET sell_price = 5000 WHERE (sell_price IS NULL OR sell_price = 0) AND rarity='mythic'")
+    except Exception:
+        pass
+
+    con.commit()
+    # ========== КОНЕЦ МИГРАЦИИ ==========
+
+    cur.execute("INSERT OR IGNORE INTO admins(user_id,role,created_at) VALUES(?,?,?)",(ADMIN_ID,"owner",now()))
+    for c,n,d,p in CASES: cur.execute("INSERT OR IGNORE INTO cases(code,name,description,price) VALUES(?,?,?,?)",(c,n,d,p))
+    for c,n,r,p in ITEMS: cur.execute("INSERT OR IGNORE INTO items(code,name,rarity,sell_price) VALUES(?,?,?,?)",(c,n,r,p))
+    for cc,drops in DROPS.items():
+        cr = cur.execute("SELECT id FROM cases WHERE code=?",(cc,)).fetchone()
+        if not cr: continue
+        for ic,ch in drops:
+            ir = cur.execute("SELECT id FROM items WHERE code=?",(ic,)).fetchone()
+            if ir: cur.execute("INSERT OR IGNORE INTO case_items(case_id,item_id,chance) VALUES(?,?,?)",(cr["id"],ir["id"],ch))
+    for a in [("first_case","🎁 Первый кейс","Открыть кейс",50),("ten_cases","🔥 10 кейсов","10 открытий",150),
+              ("hundred_cases","💎 100 кейсов","100 открытий",500),("collector","🎒 Коллекционер","10 предметов",250),
+              ("rich","💰 Богатый","5000 SD",500),("casino_king","🎰 Король","100 ставок",1000),
+              ("duelist","⚔️ Дуэлянт","5 побед",400),("referrer","🤝 Вербовщик","3 реферала",750)]:
+        cur.execute("INSERT OR IGNORE INTO achievements(code,name,description,reward) VALUES(?,?,?,?)",a)
+    for t in [("open5","🎁 Открой 5 кейсов","5 кейсов",5,200),("bet3","🎰 3 ставки","3 ставки",3,150),
+              ("win1","🏆 Победа","Выиграть",1,250),("daily","📅 Зайти","Заход",1,50)]:
+        cur.execute("INSERT OR IGNORE INTO tasks(code,name,description,goal,reward) VALUES(?,?,?,?,?)",t)
+    con.commit(); con.close()
     cur.execute("INSERT OR IGNORE INTO admins(user_id,role,created_at) VALUES(?,?,?)",(ADMIN_ID,"owner",now()))
     for c,n,d,p in CASES: cur.execute("INSERT OR IGNORE INTO cases(code,name,description,price) VALUES(?,?,?,?)",(c,n,d,p))
     for c,n,r,p in ITEMS: cur.execute("INSERT OR IGNORE INTO items(code,name,rarity,sell_price) VALUES(?,?,?,?)",(c,n,r,p))
