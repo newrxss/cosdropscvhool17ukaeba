@@ -11,7 +11,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-BOT_TOKEN = "8984416350:AAG6y9BXwwEud5R3LfcPHniCfhr744tHefk"
+BOT_TOKEN = "8835340993:AAHSTFMcY5pJ5VK2mrDAf9bW_MWFgRoxKLU"
 ADMIN_ID = 8146320391
 DB_FILE = "cosdrop.sqlite3"
 IMAGE_FILE = "imagemain.png"
