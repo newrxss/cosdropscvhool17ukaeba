@@ -11,7 +11,7 @@ from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
     InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-BOT_TOKEN = "8835340993:AAFRQwvyG-PoyMP_Rcb6qVx6IVQ8S5VyjII"
+BOT_TOKEN = "8984416350:AAG6y9BXwwEud5R3LfcPHniCfhr744tHefk"
 ADMIN_ID = 8146320391
 DB_FILE = "cosdrop.sqlite3"
 IMAGE_FILE = "imagemain.png"
@@ -248,7 +248,7 @@ def init_db():
     ]:
         cur.execute("INSERT OR IGNORE INTO tasks(code,name,description,goal,reward) VALUES(?,?,?,?,?)", t)
     con.commit()
-    con.close()
+    
 
     # ========== МИГРАЦИЯ (добавляет недостающие колонки) ==========
     def _cols(table):
