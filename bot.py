@@ -412,6 +412,28 @@ def has_sub(user):
     except Exception: return False
 def badge(user): return SUB_BONUS["badge"]+" " if has_sub(user) else ""
 
+# ========== ПРОВЕРКА ПОДПИСКИ НА РЕЗЕРВНЫЙ КАНАЛ ==========
+RESERVE_CHANNEL = "@cosdroprezerv"
+RESERVE_CHANNEL_URL = "https://t.me/cosdroprezerv"
+
+async def is_subscribed_to_reserve(uid):
+    """Проверяет подписку пользователя на резервный канал COS-DROP."""
+    if is_admin(uid):
+        return True
+    try:
+        member = await bot.get_chat_member(RESERVE_CHANNEL, uid)
+        return member.status in {"member", "administrator", "creator"}
+    except Exception as e:
+        logging.warning("Reserve channel subscription check failed for %s: %s", uid, e)
+        return False
+
+
+def reserve_sub_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на резервный канал", url=RESERVE_CHANNEL_URL)]
+    ])
+
+
 # ========== КОНЕЦ ЧАСТИ 1/4 ==========
 # ========== КЛАВИАТУРЫ ==========
 def home_kb(user=None):
@@ -473,6 +495,17 @@ async def start(message: Message):
     user = ensure(message.from_user)
     if user["blocked"]:
         return await message.answer("🚫 <b>Аккаунт заблокирован.</b>")
+
+    # До начала работы с ботом обычный пользователь обязан подписаться
+    # на резервный канал. После подписки нужно снова отправить /start.
+    if not await is_subscribed_to_reserve(message.from_user.id):
+        return await message.answer(
+            "⚠️ <b>Подпишитесь на резервный канал COS-DROP</b>\n\n"
+            "Чтобы продолжить пользоваться ботом, сначала подпишитесь на наш резервный канал.\n\n"
+            "После подписки отправьте команду <code>/start</code> ещё раз.",
+            reply_markup=reserve_sub_kb()
+        )
+
     if ref and ref != message.from_user.id and not user["referrer_id"] and get_limit("referral_enabled"):
         con = db()
         if con.execute("SELECT user_id FROM users WHERE user_id=?",(ref,)).fetchone():
