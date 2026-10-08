@@ -1092,32 +1092,202 @@ async def duel_create(callback: CallbackQuery, state: FSMContext):
 @dp.message(StateFilter(DuelBet.amount))
 async def duel_amount(message: Message, state: FSMContext):
     try: amount = int((message.text or "").strip())
-    except Exception: return await message.answer("❌")
-    if amount < get_limit("duel_min"): return await message.answer(f"❌ Мин {get_limit('duel_min')}.")
-    if not take_sd(message.from_user.id,amount): return await message.answer("❌ Мало SD.")
+    except Exception:
+        return await message.answer("❌ Введи целое число.")
+
+    if amount < get_limit("duel_min"):
+        return await message.answer(f"❌ Минимальная ставка: {get_limit('duel_min')} SD.")
+
+    if not take_sd(message.from_user.id,amount):
+        return await message.answer("❌ Недостаточно SD для ставки.")
+
+    # Создаём открытый вызов. Ставка создателя уже заблокирована на время дуэли.
     con = db()
-    cur = con.execute("INSERT INTO duels(challenger_id,opponent_id,amount,status,created_at) VALUES(?,?,?,?,?)",
-        (message.from_user.id,0,amount,"open",now()))
-    did = cur.lastrowid; con.commit(); con.close(); await state.clear()
-    await message.answer(f"⚔️ Дуэль #{did}\n\nВызов: <code>/duel {did}</code>\nСумма: {amount} SD",reply_markup=back("duels"))
+    cur = con.execute(
+        "INSERT INTO duels(challenger_id,opponent_id,amount,status,created_at) VALUES(?,?,?,?,?)",
+        (message.from_user.id,0,amount,"open",now())
+    )
+    did = cur.lastrowid
+    con.commit()
+
+    # Получаем всех незаблокированных игроков до закрытия соединения.
+    users = con.execute("SELECT user_id FROM users WHERE blocked=0 AND user_id!=?",(message.from_user.id,)).fetchall()
+    con.close()
+    await state.clear()
+
+    username = message.from_user.username
+    if username:
+        challenger_name = f"@{escape(username)}"
+    else:
+        challenger_name = f"<code>{message.from_user.id}</code>"
+
+    text = (
+        "⚔️ <b>НОВЫЙ ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
+        f"👤 {challenger_name} захотел дуэль!\n"
+        f"💰 Ставка: <b>{amount} SD</b>\n\n"
+        "Кто хочет пойти с ним на сражение?"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⚔️ DUEL",callback_data=f"duel_join:{did}")
+    kb.adjust(1)
+
+    # Рассылка всем игрокам. Небольшими пачками, чтобы не упираться в лимиты Telegram.
+    for i in range(0,len(users),20):
+        batch = users[i:i+20]
+        await asyncio.gather(*[
+            bot.send_message(r["user_id"],text,reply_markup=kb.as_markup())
+            for r in batch
+        ],return_exceptions=True)
+        if i + 20 < len(users):
+            await asyncio.sleep(1)
+
+    await message.answer(
+        f"⚔️ <b>Вызов создан!</b>\n\n"
+        f"Ставка: <b>{amount} SD</b>\n"
+        f"Ожидаем соперника...\n\n"
+        f"ID дуэли: <code>{did}</code>",
+        reply_markup=back("duels")
+    )
+
+@dp.callback_query(F.data.startswith("duel_join:"))
+async def duel_join(callback: CallbackQuery):
+    try:
+        did = int(callback.data.split(":",1)[1])
+    except Exception:
+        return await callback.answer("❌ Некорректная дуэль.",show_alert=True)
+
+    uid = callback.from_user.id
+    ensure(callback.from_user)
+
+    # Блокируем строку дуэли, чтобы два человека не смогли одновременно принять один вызов.
+    con = db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT * FROM duels WHERE id=?",(did,)).fetchone()
+
+        if not row or row["status"] != "open":
+            con.rollback()
+            con.close()
+            return await callback.answer("❌ Эта дуэль уже принята или недоступна.",show_alert=True)
+
+        if row["challenger_id"] == uid:
+            con.rollback()
+            con.close()
+            return await callback.answer("❌ Нельзя принять собственную дуэль.",show_alert=True)
+
+        amount = int(row["amount"])
+        player = con.execute("SELECT sd,blocked FROM users WHERE user_id=?",(uid,)).fetchone()
+        if not player or player["blocked"]:
+            con.rollback()
+            con.close()
+            return await callback.answer("❌ Ты не можешь участвовать в этой дуэли.",show_alert=True)
+
+        if player["sd"] < amount:
+            con.rollback()
+            con.close()
+            return await callback.answer(f"❌ Нужно {amount} SD для ставки.",show_alert=True)
+
+        # Забираем ставку соперника и сразу закрываем вызов.
+        changed = con.execute(
+            "UPDATE users SET sd=sd-? WHERE user_id=? AND sd>=?",
+            (amount,uid,amount)
+        ).rowcount
+        if changed != 1:
+            con.rollback()
+            con.close()
+            return await callback.answer("❌ Не удалось списать ставку.",show_alert=True)
+
+        winner = random.choice([row["challenger_id"],uid])
+        pot = amount * 2
+        commission = int(pot * get_limit("duel_commission"))
+        prize = pot - commission
+
+        con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(prize,winner))
+        con.execute(
+            "UPDATE duels SET opponent_id=?, status='done', winner_id=?, finished_at=? WHERE id=? AND status='open'",
+            (uid,winner,now(),did)
+        )
+        con.commit()
+    except Exception:
+        con.rollback()
+        con.close()
+        logging.exception("duel_join failed")
+        return await callback.answer("❌ Не удалось начать дуэль. Попробуй ещё раз.",show_alert=True)
+
+    con.close()
+
+    await callback.answer("⚔️ Ты принял вызов!",show_alert=True)
+    await check_achievements(winner)
+
+    challenger = row["challenger_id"]
+    winner_text = "ты" if winner == uid else f"<code>{winner}</code>"
+    result = (
+        f"⚔️ <b>ДУЭЛЬ #{did} ЗАВЕРШЕНА!</b>\n\n"
+        f"💰 Ставка: <b>{amount} SD</b>\n"
+        f"🏆 Победитель: {winner_text}\n"
+        f"💎 Выигрыш: <b>{prize} SD</b>\n"
+        f"📉 Комиссия: <b>{commission} SD</b>"
+    )
+
+    # Обновляем сообщение с вызовом у принявшего, чтобы кнопка больше не выглядела активной.
+    try:
+        await callback.message.edit_text(result)
+    except Exception:
+        pass
+
+    if challenger != uid:
+        try:
+            await bot.send_message(
+                challenger,
+                f"⚔️ <b>Твою дуэль #{did} приняли!</b>\n\n"
+                f"💰 Ставка: <b>{amount} SD</b>\n"
+                f"🏆 Победитель: <code>{winner}</code>\n"
+                f"💎 Выигрыш: <b>{prize} SD</b>"
+            )
+        except Exception:
+            pass
 
 @dp.message(Command("duel"))
 async def duel_accept(message: Message):
+    # Старый способ остаётся совместимым: /duel ID тоже может принять открытую дуэль.
     parts = message.text.split()
-    if len(parts) < 2: return await message.answer("Использование: /duel ID")
-    try: did = int(parts[1])
-    except Exception: return await message.answer("❌")
-    con = db(); row = con.execute("SELECT * FROM duels WHERE id=?",(did,)).fetchone()
-    if not row or row["status"] != "open": con.close(); return await message.answer("❌ Недоступна.")
-    if row["challenger_id"] == message.from_user.id: con.close(); return await message.answer("❌ С собой нельзя.")
-    opp = ensure(message.from_user)
-    if opp["sd"] < row["amount"]: con.close(); return await message.answer("❌ Мало SD.")
-    con.execute("UPDATE users SET sd=sd-? WHERE user_id=?",(row["amount"],message.from_user.id))
-    winner = random.choice([row["challenger_id"],message.from_user.id])
-    pot = row["amount"]*2; prize = pot-int(pot*get_limit("duel_commission"))
-    con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(prize,winner))
-    con.execute("UPDATE duels SET opponent_id=?, status='done', winner_id=?, finished_at=? WHERE id=?",
-        (message.from_user.id,winner,now(),did)); con.commit(); con.close()
+    if len(parts) < 2:
+        return await message.answer("Использование: /duel ID")
+    try:
+        did = int(parts[1])
+    except Exception:
+        return await message.answer("❌")
+
+    # Перенаправляем старый командный способ на ту же игровую логику.
+    con = db()
+    row = con.execute("SELECT * FROM duels WHERE id=?",(did,)).fetchone()
+    con.close()
+    if not row or row["status"] != "open":
+        return await message.answer("❌ Дуэль уже принята или недоступна.")
+    if row["challenger_id"] == message.from_user.id:
+        return await message.answer("❌ С собой нельзя.")
+
+    # Ставка соперника списывается здесь с защитой от двойного принятия.
+    con = db()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT * FROM duels WHERE id=?",(did,)).fetchone()
+        if not row or row["status"] != "open":
+            con.rollback(); con.close(); return await message.answer("❌ Дуэль уже принята.")
+        amount = int(row["amount"])
+        changed = con.execute("UPDATE users SET sd=sd-? WHERE user_id=? AND sd>=?",(amount,message.from_user.id,amount)).rowcount
+        if changed != 1:
+            con.rollback(); con.close(); return await message.answer("❌ Мало SD.")
+        winner = random.choice([row["challenger_id"],message.from_user.id])
+        pot = amount * 2
+        prize = pot-int(pot*get_limit("duel_commission"))
+        con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(prize,winner))
+        con.execute("UPDATE duels SET opponent_id=?,status='done',winner_id=?,finished_at=? WHERE id=?",(message.from_user.id,winner,now(),did))
+        con.commit()
+    except Exception:
+        con.rollback(); con.close(); return await message.answer("❌ Ошибка дуэли.")
+    con.close()
     await check_achievements(winner)
     await message.answer(f"⚔️ Победитель: <code>{winner}</code>\nПриз: {prize} SD")
     try: await bot.send_message(row["challenger_id"],f"⚔️ Дуэль #{did} завершена.")
