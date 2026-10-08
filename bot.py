@@ -24,48 +24,6 @@ if not BOT_TOKEN:
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-
-# ========== SECTION IMAGES ==========
-SECTION_IMAGES = {
-    "play": "caselol.png",
-    "casino": "casicw.png",
-    "profile": "profile.png",
-    "balance": "balance.png",
-    "collection": "collect.png",
-    "rating": "rait.png",
-    "promo": "promocodes.png",
-    "duels": "duel.png",
-}
-
-async def edit_ui(callback: CallbackQuery, *args, **kwargs):
-    """Редактирует обычное сообщение или подпись у сообщения с картинкой.
-    Для главных разделов автоматически ставит нужную картинку, не меняя кнопки.
-    """
-    text = args[0] if args else kwargs.pop("text", "")
-    reply_markup = kwargs.pop("reply_markup", None)
-    # Остальные параметры edit_text поддерживаем максимально совместимо.
-    if callback.data == "home" and callback.message.photo:
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-        return await callback.message.answer(text, reply_markup=reply_markup, **kwargs)
-
-    if callback.data in SECTION_IMAGES and not callback.message.photo:
-        path = SECTION_IMAGES[callback.data]
-        if os.path.isfile(path) and os.path.getsize(path) > 0:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            return await callback.message.answer_photo(
-                FSInputFile(path), caption=text, reply_markup=reply_markup
-            )
-
-    if callback.message.photo:
-        return await callback.message.edit_caption(caption=text, reply_markup=reply_markup, **kwargs)
-    return await edit_ui(callback, text, reply_markup=reply_markup, **kwargs)
-
 # ========== ЛИМИТЫ ==========
 LIMIT_DEFAULTS = {
     "starter_sd": 100, "daily_base": 50, "daily_streak_7": 300, "daily_streak_30": 2000,
@@ -571,7 +529,7 @@ async def start(message: Message):
 async def home(callback: CallbackQuery):
     user = ensure(callback.from_user)
     if user["blocked"]: return await callback.answer("Заблокирован.",show_alert=True)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"🎁 <b>COS-DROP</b>\n\n{badge(user)}💰 SD: <b>{user['sd']}</b>\n"
         f"⭐ Уровень: <b>{user['level']}</b>\n\nВыбери раздел:",reply_markup=home_kb(user))
     await callback.answer()
@@ -583,7 +541,7 @@ async def play(callback: CallbackQuery):
     b = InlineKeyboardBuilder()
     for r in rows: b.button(text=f"{r['name']} · {r['price']} SD",callback_data=f"case:{r['id']}")
     b.button(text="◀️ Назад",callback_data="home"); b.adjust(1)
-    await edit_ui(callback, "🎮 <b>КЕЙСЫ</b>",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("🎮 <b>КЕЙСЫ</b>",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data.startswith("case:"))
 async def case_info(callback: CallbackQuery):
@@ -594,7 +552,7 @@ async def case_info(callback: CallbackQuery):
     b.button(text="🎁 Открыть",callback_data=f"open:{cid}")
     b.button(text="🎁 ×5 (-10%)",callback_data=f"open5:{cid}")
     b.button(text="◀️ Назад",callback_data="play"); b.adjust(1)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"📦 <b>{escape(row['name'])}</b>\n\n{escape(row['description'])}\n\n💰 <b>{row['price']} SD</b>",
         reply_markup=b.as_markup()); await callback.answer()
 
@@ -632,7 +590,7 @@ async def open_case(callback: CallbackQuery):
     if err: return await callback.answer(err,show_alert=True)
     s = res[0]
     await check_achievements(callback.from_user.id); await bump_task(callback.from_user.id,"open5",1)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"✨ <b>ОТКРЫТИЕ</b>\n\n{RARITY.get(s['rarity'],'⚪')}\n\n<b>{escape(s['name'])}</b>\n\n🎒 +10 XP",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎮 Ещё",callback_data="play")],
@@ -649,7 +607,7 @@ async def open_case_5(callback: CallbackQuery):
     if err: return await callback.answer(err,show_alert=True)
     text = "✨ <b>×5</b>\n\n"+"\n".join(f"{RARITY.get(r['rarity'],'⚪')} <b>{escape(r['name'])}</b>" for r in res)
     await check_achievements(callback.from_user.id); await bump_task(callback.from_user.id,"open5",5)
-    await edit_ui(callback, text,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await callback.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎮 Ещё",callback_data="play")],
         [InlineKeyboardButton(text="🏠 Меню",callback_data="home")]]))
     await callback.answer()
@@ -662,11 +620,11 @@ async def collection(callback: CallbackQuery):
         FROM inventory inv JOIN items i ON i.id=inv.item_id WHERE inv.user_id=?
         GROUP BY inv.item_id ORDER BY i.rarity, i.name""",(callback.from_user.id,)).fetchall()
     con.close()
-    if not rows: return await edit_ui(callback, "🎒 <b>КОЛЛЕКЦИЯ</b>\n\nПусто.",reply_markup=back())
+    if not rows: return await callback.message.edit_text("🎒 <b>КОЛЛЕКЦИЯ</b>\n\nПусто.",reply_markup=back())
     b = InlineKeyboardBuilder()
     for r in rows: b.button(text=f"{RARITY.get(r['rarity'],'⚪')} {r['name']} ×{r['n']}",callback_data=f"item:{r['id']}")
     b.button(text="◀️ Назад",callback_data="home"); b.adjust(1)
-    await edit_ui(callback, "🎒 <b>КОЛЛЕКЦИЯ</b>",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("🎒 <b>КОЛЛЕКЦИЯ</b>",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data.startswith("item:"))
 async def item_menu(callback: CallbackQuery):
@@ -682,7 +640,7 @@ async def item_menu(callback: CallbackQuery):
     b.button(text=f"💰 Продать всё ({st} SD)",callback_data=f"sell:all:{iid}")
     b.button(text="⬆️ Апгрейд ×3",callback_data=f"upgrade:{iid}")
     b.button(text="◀️ Назад",callback_data="collection"); b.adjust(1)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"{RARITY.get(row['rarity'],'⚪')} <b>{escape(row['name'])}</b>\n\nВ инвентаре: <b>{cnt}</b>\n"
         f"Цена за 1: <b>{row['sell_price']} SD</b>\nКомиссия: {int(comm*100)}%",
         reply_markup=b.as_markup()); await callback.answer()
@@ -736,7 +694,7 @@ async def profile(callback: CallbackQuery):
     refs = con.execute("SELECT COUNT(*) n FROM users WHERE referrer_id=?",(u["user_id"],)).fetchone()["n"]
     con.close()
     sub = "✅" if has_sub(u) else "❌"
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"👤 <b>ПРОФИЛЬ</b>\n\nID: <code>{u['user_id']}</code>\n@{escape(u['username'] or 'нет')}\n\n"
         f"{badge(u)}💰 SD: <b>{u['sd']}</b>\n⭐ Lv: <b>{u['level']}</b> · ✨ XP: <b>{u['xp']}</b>\n\n"
         f"🎁 Кейсов: <b>{ops}</b>\n🎒 Предметов: <b>{inv}</b>\n🏅 Достижений: <b>{achs}</b>\n"
@@ -746,7 +704,7 @@ async def profile(callback: CallbackQuery):
 @dp.callback_query(F.data == "balance")
 async def balance(callback: CallbackQuery):
     u = ensure(callback.from_user)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"💰 <b>БАЛАНС</b>\n\nТвой баланс: <b>{u['sd']} SD</b>\n\n🎁 Daily: <b>+{get_limit('daily_base')} SD</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎁 Бонус",callback_data="daily")],
@@ -782,7 +740,7 @@ async def topup(callback: CallbackQuery):
     b = InlineKeyboardBuilder()
     for sd,stars in packs: b.button(text=f"⭐ {sd} SD — {stars} ⭐",callback_data=f"buy:{sd}:{stars}")
     b.button(text="◀️ Назад",callback_data="home"); b.adjust(1)
-    await edit_ui(callback, "⭐ <b>ПОПОЛНЕНИЕ</b>",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("⭐ <b>ПОПОЛНЕНИЕ</b>",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def buy_pack(callback: CallbackQuery):
@@ -830,7 +788,7 @@ async def subscribe(callback: CallbackQuery):
     b = InlineKeyboardBuilder()
     b.button(text=f"💎 Купить ({price} ⭐ / {days} дн.)",callback_data="sub_buy")
     b.button(text="◀️ Назад",callback_data="home"); b.adjust(1)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"💎 <b>CosDrop+</b>\n\nСтатус: <b>{status}</b>\n\n"
         f"• 💰 ×{SUB_BONUS['daily_mult']} к daily\n• ✨ +{int((SUB_BONUS['xp_mult']-1)*100)}% XP\n"
         f"• {SUB_BONUS['badge']} значок\n\nЦена: <b>{price} ⭐ / {days} дней</b>",reply_markup=b.as_markup())
@@ -843,7 +801,7 @@ async def casino_main(callback: CallbackQuery):
     u = ensure(callback.from_user)
     if u["blocked"]: return await callback.answer("Заблокирован.",show_alert=True)
     if not get_limit("casino_enabled"): return await callback.answer("Казино выключено.",show_alert=True)
-    await edit_ui(callback, f"🎰 <b>COS-CASINO</b>\n\n💰 Баланс: <b>{u['sd']} SD</b>",reply_markup=casino_menu())
+    await callback.message.edit_text(f"🎰 <b>COS-CASINO</b>\n\n💰 Баланс: <b>{u['sd']} SD</b>",reply_markup=casino_menu())
     await callback.answer()
 
 def _log_bet(uid,game,bet,win):
@@ -869,30 +827,30 @@ def _apply_loss(uid,amount):
 
 @dp.callback_query(F.data == "cas_slots")
 async def cas_slots(callback: CallbackQuery):
-    await edit_ui(callback, "🎰 <b>СЛОТЫ</b>\n\n🍒×3 · 🍋×4 · 🔔×6\n💎×12 · 7️⃣×25 · ⭐×50",reply_markup=bet_kb("slots")); await callback.answer()
+    await callback.message.edit_text("🎰 <b>СЛОТЫ</b>\n\n🍒×3 · 🍋×4 · 🔔×6\n💎×12 · 7️⃣×25 · ⭐×50",reply_markup=bet_kb("slots")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_dice")
 async def cas_dice(callback: CallbackQuery):
-    await edit_ui(callback, "🎲 <b>КОСТИ</b>\n\n<7 ×2 · >7 ×2 · =7 ×5",reply_markup=bet_kb("dice")); await callback.answer()
+    await callback.message.edit_text("🎲 <b>КОСТИ</b>\n\n<7 ×2 · >7 ×2 · =7 ×5",reply_markup=bet_kb("dice")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_coin")
 async def cas_coin(callback: CallbackQuery):
-    await edit_ui(callback, "🪙 <b>МОНЕТКА</b> ×2",reply_markup=bet_kb("coin")); await callback.answer()
+    await callback.message.edit_text("🪙 <b>МОНЕТКА</b> ×2",reply_markup=bet_kb("coin")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_roulette")
 async def cas_roulette(callback: CallbackQuery):
-    await edit_ui(callback, "🎡 <b>РУЛЕТКА</b>\n\n🔴 ×2 · ⚫ ×2 · 🟢 ×14",reply_markup=bet_kb("roulette")); await callback.answer()
+    await callback.message.edit_text("🎡 <b>РУЛЕТКА</b>\n\n🔴 ×2 · ⚫ ×2 · 🟢 ×14",reply_markup=bet_kb("roulette")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_mines")
 async def cas_mines(callback: CallbackQuery):
-    await edit_ui(callback, "💣 <b>МИНЫ</b>",reply_markup=bet_kb("mines")); await callback.answer()
+    await callback.message.edit_text("💣 <b>МИНЫ</b>",reply_markup=bet_kb("mines")); await callback.answer()
 
 @dp.callback_query(F.data.startswith("bet:"))
 async def bet_select(callback: CallbackQuery, state: FSMContext):
     _,game,val = callback.data.split(":")
     if val == "custom":
         await state.set_state(CasinoBet.amount); await state.update_data(game=game)
-        await edit_ui(callback, f"✏️ Сумма ({get_limit('casino_min')}-{get_limit('casino_max')}):",reply_markup=back("casino"))
+        await callback.message.edit_text(f"✏️ Сумма ({get_limit('casino_min')}-{get_limit('casino_max')}):",reply_markup=back("casino"))
         return await callback.answer()
     await _cas_continue(callback,game,int(val))
 
@@ -915,25 +873,25 @@ async def _cas_continue(callback,game,bet):
             [InlineKeyboardButton(text="Больше 7 ×2",callback_data=f"dice:gt:{bet}")],
             [InlineKeyboardButton(text="Ровно 7 ×5",callback_data=f"dice:eq:{bet}")],
             [InlineKeyboardButton(text="◀️",callback_data="casino")]])
-        await edit_ui(callback, f"🎲 Ставка: {bet} SD",reply_markup=kb)
+        await callback.message.edit_text(f"🎲 Ставка: {bet} SD",reply_markup=kb)
     elif game == "coin":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🪙 Орёл",callback_data=f"coin:o:{bet}")],
             [InlineKeyboardButton(text="🪙 Решка",callback_data=f"coin:r:{bet}")],
             [InlineKeyboardButton(text="◀️",callback_data="casino")]])
-        await edit_ui(callback, f"🪙 Ставка: {bet} SD",reply_markup=kb)
+        await callback.message.edit_text(f"🪙 Ставка: {bet} SD",reply_markup=kb)
     elif game == "roulette":
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔴 ×2",callback_data=f"rl:red:{bet}")],
             [InlineKeyboardButton(text="⚫ ×2",callback_data=f"rl:black:{bet}")],
             [InlineKeyboardButton(text="🟢 ×14",callback_data=f"rl:green:{bet}")],
             [InlineKeyboardButton(text="◀️",callback_data="casino")]])
-        await edit_ui(callback, f"🎡 Ставка: {bet} SD",reply_markup=kb)
+        await callback.message.edit_text(f"🎡 Ставка: {bet} SD",reply_markup=kb)
     elif game == "mines":
         b = InlineKeyboardBuilder()
         for m in [1,3,5,10,24]: b.button(text=f"💣 {m}",callback_data=f"mines:{bet}:{m}")
         b.button(text="◀️",callback_data="casino"); b.adjust(3,2,1)
-        await edit_ui(callback, f"💣 Ставка: {bet} SD",reply_markup=b.as_markup())
+        await callback.message.edit_text(f"💣 Ставка: {bet} SD",reply_markup=b.as_markup())
     elif game == "slots":
         await _slots_spin(callback.message,callback.from_user.id,bet)
     await callback.answer()
@@ -976,7 +934,7 @@ async def dice_play(callback: CallbackQuery):
     await check_achievements(callback.from_user.id); await bump_task(callback.from_user.id,"bet3",1)
     if win > bet: await bump_task(callback.from_user.id,"win1",1)
     txt = f"🎲 <b>{a}+{b}={total}</b>\n\n"+(f"🎉 +{win} SD" if win > 0 else f"❌ -{bet} SD")
-    await edit_ui(callback, txt,reply_markup=back("casino")); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back("casino")); await callback.answer()
 
 @dp.callback_query(F.data.startswith("coin:"))
 async def coin_play(callback: CallbackQuery):
@@ -990,7 +948,7 @@ async def coin_play(callback: CallbackQuery):
     if win > bet: await bump_task(callback.from_user.id,"win1",1)
     txt = ("🪙 Орёл" if res == "o" else "🪙 Решка")+"\n\n"
     txt += f"🎉 +{win} SD" if win > 0 else f"❌ -{bet} SD"
-    await edit_ui(callback, txt,reply_markup=back("casino")); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back("casino")); await callback.answer()
 
 @dp.callback_query(F.data.startswith("rl:"))
 async def roulette_play(callback: CallbackQuery):
@@ -1009,7 +967,7 @@ async def roulette_play(callback: CallbackQuery):
     if win > bet: await bump_task(callback.from_user.id,"win1",1)
     em = {"red":"🔴","black":"⚫","green":"🟢"}[color]
     txt = f"🎡 Выпало: <b>{num}</b> {em}\n\n"+(f"🎉 +{win} SD" if win > 0 else f"❌ -{bet} SD")
-    await edit_ui(callback, txt,reply_markup=back("casino")); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back("casino")); await callback.answer()
 
 @dp.callback_query(F.data.startswith("mines:"))
 async def mines_start(callback: CallbackQuery):
@@ -1049,7 +1007,7 @@ async def mine_open(callback: CallbackQuery):
     if idx in st["picked"]:
         con.execute("DELETE FROM settings WHERE key=?",(f"mines_{uid}",)); con.commit(); con.close()
         _log_bet(uid,"mines",st["bet"],0); _apply_loss(uid,st["bet"])
-        await edit_ui(callback, f"💥 МИНА! -{st['bet']} SD",reply_markup=back("casino"))
+        await callback.message.edit_text(f"💥 МИНА! -{st['bet']} SD",reply_markup=back("casino"))
         return await callback.answer()
     st["opened"].append(idx)
     con.execute("UPDATE settings SET value=? WHERE key=?",(json.dumps(st),f"mines_{uid}")); con.commit(); con.close()
@@ -1066,14 +1024,14 @@ async def mine_take(callback: CallbackQuery):
     add_sd(uid,win); _log_bet(uid,"mines",st["bet"],win)
     await check_achievements(uid); await bump_task(uid,"bet3",1)
     if win > st["bet"]: await bump_task(uid,"win1",1)
-    await edit_ui(callback, f"💰 +{win} SD (×{mult})",reply_markup=back("casino")); await callback.answer()
+    await callback.message.edit_text(f"💰 +{win} SD (×{mult})",reply_markup=back("casino")); await callback.answer()
 
 @dp.callback_query(F.data == "cas_stats")
 async def cas_stats(callback: CallbackQuery):
     con = db(); row = con.execute("SELECT * FROM casino_stats WHERE user_id=?",(callback.from_user.id,)).fetchone(); con.close()
-    if not row: return await edit_ui(callback, "📊 Пусто.",reply_markup=back("casino"))
+    if not row: return await callback.message.edit_text("📊 Пусто.",reply_markup=back("casino"))
     p = row["total_won"]-row["total_lost"]
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"📊 <b>СТАТ</b>\n\nСтавок: {row['total_bets']}\nВыиграно: {row['total_won']}\n"
         f"Проиграно: {row['total_lost']}\nПрофит: {p:+d}\nЛучший: {row['biggest_win']}",reply_markup=back("casino"))
     await callback.answer()
@@ -1084,9 +1042,9 @@ async def cas_top(callback: CallbackQuery):
     rows = con.execute("""SELECT u.username,u.first_name,cs.biggest_win FROM casino_stats cs
         JOIN users u ON u.user_id=cs.user_id WHERE cs.biggest_win>0 ORDER BY cs.biggest_win DESC LIMIT 10""").fetchall()
     con.close()
-    if not rows: return await edit_ui(callback, "🏆 Пусто.",reply_markup=back("casino"))
+    if not rows: return await callback.message.edit_text("🏆 Пусто.",reply_markup=back("casino"))
     txt = "🏆 <b>ТОП</b>\n\n"+"\n".join(f"{i}. @{escape(r['username'] or r['first_name'] or '-')} — {r['biggest_win']}" for i,r in enumerate(rows,1))
-    await edit_ui(callback, txt,reply_markup=back("casino")); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back("casino")); await callback.answer()
 
 # ========== TASKS ==========
 async def bump_task(uid,code,amount):
@@ -1115,7 +1073,7 @@ async def tasks_menu(callback: CallbackQuery):
         ut = con.execute("SELECT * FROM user_tasks WHERE user_id=? AND task_id=? AND date=?",(callback.from_user.id,t["id"],today())).fetchone()
         p = ut["progress"] if ut else 0; d = "✅" if ut and ut["done"] else ""
         txt += f"{d} <b>{escape(t['name'])}</b> — {p}/{t['goal']} · +{t['reward']} SD\n"
-    con.close(); await edit_ui(callback, txt,reply_markup=back()); await callback.answer()
+    con.close(); await callback.message.edit_text(txt,reply_markup=back()); await callback.answer()
 
 # ========== DUELS ==========
 @dp.callback_query(F.data == "duels")
@@ -1123,14 +1081,14 @@ async def duels_menu(callback: CallbackQuery):
     b = InlineKeyboardBuilder()
     b.button(text="⚔️ Создать",callback_data="duel_create"); b.button(text="📜 Мои",callback_data="duel_my")
     b.button(text="◀️ Назад",callback_data="home"); b.adjust(1)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"⚔️ <b>ДУЭЛИ</b>\n\nМин: {get_limit('duel_min')} SD. Комиссия: {int(get_limit('duel_commission')*100)}%",
         reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data == "duel_create")
 async def duel_create(callback: CallbackQuery, state: FSMContext):
     await state.set_state(DuelBet.amount)
-    await edit_ui(callback, f"⚔️ Сумма (мин {get_limit('duel_min')}):",reply_markup=back("duels")); await callback.answer()
+    await callback.message.edit_text(f"⚔️ Сумма (мин {get_limit('duel_min')}):",reply_markup=back("duels")); await callback.answer()
 
 @dp.message(StateFilter(DuelBet.amount))
 async def duel_amount(message: Message, state: FSMContext):
@@ -1275,7 +1233,7 @@ async def duel_join(callback: CallbackQuery):
 
     # Обновляем сообщение с вызовом у принявшего, чтобы кнопка больше не выглядела активной.
     try:
-        await edit_ui(callback, result)
+        await callback.message.edit_text(result)
     except Exception:
         pass
 
@@ -1341,16 +1299,16 @@ async def duel_my(callback: CallbackQuery):
     con = db()
     rows = con.execute("SELECT * FROM duels WHERE challenger_id=? OR opponent_id=? ORDER BY id DESC LIMIT 20",
         (callback.from_user.id,callback.from_user.id)).fetchall(); con.close()
-    if not rows: return await edit_ui(callback, "📜 Пусто.",reply_markup=back("duels"))
+    if not rows: return await callback.message.edit_text("📜 Пусто.",reply_markup=back("duels"))
     txt = "📜 <b>МОИ ДУЭЛИ</b>\n\n"+"\n".join(f"#{r['id']} · {r['amount']} SD · {r['status']}" for r in rows)
-    await edit_ui(callback, txt,reply_markup=back("duels")); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back("duels")); await callback.answer()
 
 # ========== REF / RATING / ACH / ABOUT / MEDIA ==========
 @dp.callback_query(F.data == "ref")
 async def ref_menu(callback: CallbackQuery):
     me = await bot.get_me(); link = f"https://t.me/{me.username}?start={callback.from_user.id}"
     con = db(); refs = con.execute("SELECT COUNT(*) n FROM users WHERE referrer_id=?",(callback.from_user.id,)).fetchone()["n"]; con.close()
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"👥 <b>РЕФЕРАЛЫ</b>\n\nПриглашено: <b>{refs}</b>\n"
         f"За друга: +{get_limit('ref_invite')} SD\nЗа донат: +{get_limit('ref_donate')} SD\n\n"
         f"Ссылка:\n<code>{link}</code>",reply_markup=back()); await callback.answer()
@@ -1362,7 +1320,7 @@ async def rating(callback: CallbackQuery):
         (SELECT COUNT(*) FROM inventory i WHERE i.user_id=u.user_id) items
         FROM users u WHERE blocked=0 ORDER BY xp DESC, items DESC LIMIT 10""").fetchall(); con.close()
     txt = "🏆 <b>ТОП-10</b>\n\n"+("\n".join(f"{i}. @{escape(r['username'] or r['first_name'] or '-')} — ⭐ {r['xp']} · 🎒 {r['items']}" for i,r in enumerate(rows,1)) if rows else "Пусто.")
-    await edit_ui(callback, txt,reply_markup=back()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back()); await callback.answer()
 
 async def check_achievements(uid):
     con = db(); user = con.execute("SELECT * FROM users WHERE user_id=?",(uid,)).fetchone()
@@ -1400,21 +1358,21 @@ async def achievements(callback: CallbackQuery):
         (callback.from_user.id,)).fetchall(); con.close()
     txt = "🏅 <b>ДОСТИЖЕНИЯ</b>\n\n"+"\n".join(
         f"{'✅' if r['obtained_at'] else '🔒'} <b>{escape(r['name'])}</b> — +{r['reward']} SD" for r in rows)
-    await edit_ui(callback, txt,reply_markup=back()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=back()); await callback.answer()
 
 @dp.callback_query(F.data == "about")
 async def about(callback: CallbackQuery):
-    await edit_ui(callback, "ℹ️ <b>О COS-DROP</b>\n\nКейсы, казино, дуэли, достижения.\n💰 SD — виртуальная валюта.",reply_markup=back()); await callback.answer()
+    await callback.message.edit_text("ℹ️ <b>О COS-DROP</b>\n\nКейсы, казино, дуэли, достижения.\n💰 SD — виртуальная валюта.",reply_markup=back()); await callback.answer()
 
 @dp.callback_query(F.data == "media")
 async def media(callback: CallbackQuery):
     b = InlineKeyboardBuilder()
     b.button(text="📩 Заявка",callback_data="media_apply"); b.button(text="◀️ Назад",callback_data="home"); b.adjust(1)
-    await edit_ui(callback, "🎬 <b>МЕДИА / ПАРТНЁРСТВО</b>",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("🎬 <b>МЕДИА / ПАРТНЁРСТВО</b>",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data == "media_apply")
 async def media_apply(callback: CallbackQuery):
-    m = await edit_ui(callback, "⏳ Загрузка...")
+    m = await callback.message.edit_text("⏳ Загрузка...")
     for i in range(0,101,10):
         await asyncio.sleep(0.15)
         bar = "█"*(i//10)+"░"*(10-i//10)
@@ -1433,7 +1391,7 @@ async def withdraw_start(callback: CallbackQuery, state: FSMContext):
     mn = get_limit("min_withdraw")
     if u["sd"] < mn: return await callback.answer(f"Мин: {mn} SD",show_alert=True)
     await state.set_state(WithdrawFSM.amount)
-    await edit_ui(callback, f"💸 <b>ВЫВОД</b>\n\nБаланс: {u['sd']} SD\nМин: {mn} SD\n\nВведи сумму:")
+    await callback.message.edit_text(f"💸 <b>ВЫВОД</b>\n\nБаланс: {u['sd']} SD\nМин: {mn} SD\n\nВведи сумму:")
     await callback.answer()
 
 @dp.message(StateFilter(WithdrawFSM.amount))
@@ -1484,14 +1442,14 @@ async def wd_no(callback: CallbackQuery):
 async def applications(callback: CallbackQuery):
     con = db(); rows = con.execute("SELECT id,status FROM applications WHERE user_id=? ORDER BY id DESC LIMIT 10",(callback.from_user.id,)).fetchall(); con.close()
     txt = "\n".join(f"#{r['id']} · {r['status']}" for r in rows) or "Нет."
-    await edit_ui(callback, f"📝 <b>ЗАЯВКИ</b>\n\n{txt}",
+    await callback.message.edit_text(f"📝 <b>ЗАЯВКИ</b>\n\n{txt}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📝 Создать",callback_data="newapp")],
             [InlineKeyboardButton(text="◀️ Назад",callback_data="home")]])); await callback.answer()
 
 @dp.callback_query(F.data == "newapp")
 async def new_application(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(Apply.name); await edit_ui(callback, "📝 Введите имя:"); await callback.answer()
+    await state.set_state(Apply.name); await callback.message.edit_text("📝 Введите имя:"); await callback.answer()
 
 @dp.message(StateFilter(Apply.name))
 async def app_name(message: Message, state: FSMContext):
@@ -1546,7 +1504,7 @@ async def app_no(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "promo")
 async def promo_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(Promo.code); await edit_ui(callback, "🎟 Введите код:"); await callback.answer()
+    await state.set_state(Promo.code); await callback.message.edit_text("🎟 Введите код:"); await callback.answer()
 
 @dp.message(StateFilter(Promo.code))
 async def use_promo(message: Message, state: FSMContext):
@@ -1572,7 +1530,7 @@ async def admin_cmd(message: Message):
 @dp.callback_query(F.data == "admin_home")
 async def admin_home(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
-    await edit_ui(callback, "👑 <b>ADMIN</b>",reply_markup=admin_kb()); await callback.answer()
+    await callback.message.edit_text("👑 <b>ADMIN</b>",reply_markup=admin_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "adm_stats")
 async def adm_stats(callback: CallbackQuery):
@@ -1582,7 +1540,7 @@ async def adm_stats(callback: CallbackQuery):
     b = con.execute("SELECT COUNT(*) n FROM users WHERE blocked=1").fetchone()["n"]
     sd = con.execute("SELECT COALESCE(SUM(sd),0) n FROM users").fetchone()["n"]
     op = con.execute("SELECT COUNT(*) n FROM case_opens").fetchone()["n"]; con.close()
-    await edit_ui(callback, f"📊 <b>СТАТИСТИКА</b>\n\n👥 {u}\n🚫 {b}\n💰 {sd} SD\n🎁 {op} кейсов",reply_markup=admin_kb())
+    await callback.message.edit_text(f"📊 <b>СТАТИСТИКА</b>\n\n👥 {u}\n🚫 {b}\n💰 {sd} SD\n🎁 {op} кейсов",reply_markup=admin_kb())
     await callback.answer()
 
 @dp.callback_query(F.data == "adm_users")
@@ -1590,12 +1548,12 @@ async def adm_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT user_id,username,sd,blocked FROM users ORDER BY id DESC LIMIT 20").fetchall(); con.close()
     txt = "\n".join(f"{'🚫' if r['blocked'] else '🟢'} <code>{r['user_id']}</code> @{escape(r['username'] or '-')} · {r['sd']}" for r in rows)
-    await edit_ui(callback, f"👥 <b>ЮЗЕРЫ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
+    await callback.message.edit_text(f"👥 <b>ЮЗЕРЫ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "adm_search")
 async def adm_search(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(UserSearch.query); await edit_ui(callback, "🔎 ID или @username:"); await callback.answer()
+    await state.set_state(UserSearch.query); await callback.message.edit_text("🔎 ID или @username:"); await callback.answer()
 
 @dp.message(StateFilter(UserSearch.query))
 async def adm_search_do(message: Message, state: FSMContext):
@@ -1610,7 +1568,7 @@ async def adm_search_do(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "adm_give")
 async def adm_give(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(GiveSD.uid); await edit_ui(callback, "🎁 ID:"); await callback.answer()
+    await state.set_state(GiveSD.uid); await callback.message.edit_text("🎁 ID:"); await callback.answer()
 
 @dp.message(StateFilter(GiveSD.uid))
 async def adm_give_uid(message: Message, state: FSMContext):
@@ -1628,7 +1586,7 @@ async def adm_give_amount(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "adm_take")
 async def adm_take(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(TakeSD.uid); await edit_ui(callback, "➖ ID:"); await callback.answer()
+    await state.set_state(TakeSD.uid); await callback.message.edit_text("➖ ID:"); await callback.answer()
 
 @dp.message(StateFilter(TakeSD.uid))
 async def adm_take_uid(message: Message, state: FSMContext):
@@ -1654,11 +1612,11 @@ async def adm_blocks(callback: CallbackQuery):
         [InlineKeyboardButton(text="🚫 Блок",callback_data="block_start")],
         [InlineKeyboardButton(text="🔓 Разблок",callback_data="unblock_start")],
         [InlineKeyboardButton(text="◀️",callback_data="admin_home")]])
-    await edit_ui(callback, "🚫 <b>БЛОКИРОВКИ</b>",reply_markup=kb); await callback.answer()
+    await callback.message.edit_text("🚫 <b>БЛОКИРОВКИ</b>",reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "block_start")
 async def block_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(BlockUser.uid); await edit_ui(callback, "🚫 ID:"); await callback.answer()
+    await state.set_state(BlockUser.uid); await callback.message.edit_text("🚫 ID:"); await callback.answer()
 
 @dp.message(StateFilter(BlockUser.uid))
 async def block_do(message: Message, state: FSMContext):
@@ -1669,7 +1627,7 @@ async def block_do(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "unblock_start")
 async def unblock_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(UnblockUser.uid); await edit_ui(callback, "🔓 ID:"); await callback.answer()
+    await state.set_state(UnblockUser.uid); await callback.message.edit_text("🔓 ID:"); await callback.answer()
 
 @dp.message(StateFilter(UnblockUser.uid))
 async def unblock_do(message: Message, state: FSMContext):
@@ -1687,11 +1645,11 @@ async def adm_promo(callback: CallbackQuery):
         [InlineKeyboardButton(text="➕",callback_data="promo_add"),InlineKeyboardButton(text="🗑",callback_data="promo_del")],
         [InlineKeyboardButton(text="🎁 Массово",callback_data="a3_promo_mass")],
         [InlineKeyboardButton(text="◀️",callback_data="admin_home")]])
-    await edit_ui(callback, f"🎟 <b>ПРОМО</b>\n\n{txt}",reply_markup=kb); await callback.answer()
+    await callback.message.edit_text(f"🎟 <b>ПРОМО</b>\n\n{txt}",reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "promo_add")
 async def promo_add(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(PromoCreate.code); await edit_ui(callback, "➕ Код:"); await callback.answer()
+    await state.set_state(PromoCreate.code); await callback.message.edit_text("➕ Код:"); await callback.answer()
 
 @dp.message(StateFilter(PromoCreate.code))
 async def promo_add_code(message: Message, state: FSMContext):
@@ -1712,7 +1670,7 @@ async def promo_add_reward(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "promo_del")
 async def promo_del(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(PromoDelete.code); await edit_ui(callback, "🗑 Код:"); await callback.answer()
+    await state.set_state(PromoDelete.code); await callback.message.edit_text("🗑 Код:"); await callback.answer()
 
 @dp.message(StateFilter(PromoDelete.code))
 async def promo_del_do(message: Message, state: FSMContext):
@@ -1732,14 +1690,14 @@ async def adm_cases(callback: CallbackQuery):
         [InlineKeyboardButton(text="🔄",callback_data="case_toggle_start")],
         [InlineKeyboardButton(text="💰",callback_data="case_price_start")],
         [InlineKeyboardButton(text="◀️",callback_data="admin_home")]])
-    await edit_ui(callback, f"📦 <b>КЕЙСЫ</b>\n\n{txt}",reply_markup=kb); await callback.answer()
+    await callback.message.edit_text(f"📦 <b>КЕЙСЫ</b>\n\n{txt}",reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "case_toggle_start")
 async def case_toggle_start(callback: CallbackQuery):
     con = db(); rows = con.execute("SELECT id,name,enabled FROM cases ORDER BY id").fetchall(); con.close()
     kb = [[InlineKeyboardButton(text=f"{'🟢' if r['enabled'] else '🔴'} {r['name']}",callback_data=f"case_toggle:{r['id']}")] for r in rows]
     kb.append([InlineKeyboardButton(text="◀️",callback_data="adm_cases")])
-    await edit_ui(callback, "🎮:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback.answer()
+    await callback.message.edit_text("🎮:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback.answer()
 
 @dp.callback_query(F.data.startswith("case_toggle:"))
 async def case_toggle(callback: CallbackQuery):
@@ -1756,13 +1714,13 @@ async def case_price_start(callback: CallbackQuery):
     con = db(); rows = con.execute("SELECT id,name,price FROM cases ORDER BY id").fetchall(); con.close()
     kb = [[InlineKeyboardButton(text=f"{r['name']} · {r['price']}",callback_data=f"price_case:{r['id']}")] for r in rows]
     kb.append([InlineKeyboardButton(text="◀️",callback_data="adm_cases")])
-    await edit_ui(callback, "💰:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback.answer()
+    await callback.message.edit_text("💰:",reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)); await callback.answer()
 
 @dp.callback_query(F.data.startswith("price_case:"))
 async def price_case(callback: CallbackQuery, state: FSMContext):
     cid = int(callback.data.split(":")[1])
     await state.update_data(case_id=cid); await state.set_state(CasePrice.price)
-    await edit_ui(callback, "💰 Новая цена:"); await callback.answer()
+    await callback.message.edit_text("💰 Новая цена:"); await callback.answer()
 
 @dp.message(StateFilter(CasePrice.price))
 async def price_case_do(message: Message, state: FSMContext):
@@ -1777,19 +1735,19 @@ async def adm_items(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT name,rarity,sell_price,enabled FROM items ORDER BY id").fetchall(); con.close()
     txt = "\n".join(f"{'🟢' if r['enabled'] else '🔴'} {RARITY.get(r['rarity'],'⚪')} {r['name']} · {r['sell_price']}" for r in rows)
-    await edit_ui(callback, f"💎 <b>ПРЕДМЕТЫ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
+    await callback.message.edit_text(f"💎 <b>ПРЕДМЕТЫ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "adm_apps")
 async def adm_apps(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT id,user_id,name,status FROM applications ORDER BY id DESC LIMIT 30").fetchall(); con.close()
     txt = "\n".join(f"#{r['id']} · {r['user_id']} · {r['name']} · {r['status']}" for r in rows) or "Пусто."
-    await edit_ui(callback, f"📝 <b>ЗАЯВКИ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
+    await callback.message.edit_text(f"📝 <b>ЗАЯВКИ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(Broadcast.text); await edit_ui(callback, "📢 Текст:"); await callback.answer()
+    await state.set_state(Broadcast.text); await callback.message.edit_text("📢 Текст:"); await callback.answer()
 
 @dp.message(StateFilter(Broadcast.text))
 async def broadcast_do(message: Message, state: FSMContext):
@@ -1808,7 +1766,7 @@ async def adm_logs(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT * FROM admin_logs ORDER BY id DESC LIMIT 30").fetchall(); con.close()
     txt = "\n".join(f"{r['created_at'][:19]} · {r['action']} · {r['target_user_id'] or '-'}" for r in rows) or "Пусто."
-    await edit_ui(callback, f"📜 <b>ЛОГИ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
+    await callback.message.edit_text(f"📜 <b>ЛОГИ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "adm_backup")
 async def adm_backup(callback: CallbackQuery):
@@ -1828,7 +1786,7 @@ async def admin_withdraws(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT * FROM withdraws ORDER BY id DESC LIMIT 30").fetchall(); con.close()
     txt = "\n".join(f"#{r['id']} · {r['user_id']} · {r['amount']} · {r['status']}" for r in rows) or "Пусто."
-    await edit_ui(callback, f"💸 <b>ВЫВОДЫ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
+    await callback.message.edit_text(f"💸 <b>ВЫВОДЫ</b>\n\n{txt}",reply_markup=admin_kb()); await callback.answer()
 
 # ========== ADMIN v2 ==========
 def a2_root_kb():
@@ -1857,7 +1815,7 @@ async def a2_open(message: Message):
 async def a2_root(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.clear()
-    await edit_ui(callback, "👑 <b>ADMIN v2</b>",reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text("👑 <b>ADMIN v2</b>",reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2_close")
 async def a2_close(callback: CallbackQuery, state: FSMContext):
@@ -1880,7 +1838,7 @@ async def a2_stats(callback: CallbackQuery):
     wd = con.execute("SELECT COUNT(*) n FROM withdraws").fetchone()["n"]
     subs = con.execute("SELECT COUNT(*) n FROM users WHERE sub_until IS NOT NULL").fetchone()["n"]
     duels = con.execute("SELECT COUNT(*) n FROM duels").fetchone()["n"]; con.close()
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"📈 <b>ОБЩАЯ</b>\n\n👥 {u}\n🚫 {b}\n💰 SD: <b>{sd}</b>\n🎒 Предметов: <b>{inv}</b>\n"
         f"🎁 Открытий: <b>{op}</b>\n🎰 Ставок: <b>{bets}</b>\n💸 Выводов: <b>{wd}</b>\n"
         f"💎 Подписок: <b>{subs}</b>\n⚔️ Дуэлей: <b>{duels}</b>",
@@ -1895,14 +1853,14 @@ async def a2s_top_sd(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT user_id,username,sd FROM users ORDER BY sd DESC LIMIT 15").fetchall(); con.close()
     txt = "🏆 <b>ТОП SD</b>\n\n"+"\n".join(f"{i}. <code>{r['user_id']}</code> @{escape(r['username'] or '-')} — {r['sd']}" for i,r in enumerate(rows,1))
-    await edit_ui(callback, txt,reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2s_top_xp")
 async def a2s_top_xp(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT user_id,username,xp FROM users ORDER BY xp DESC LIMIT 15").fetchall(); con.close()
     txt = "⭐ <b>ТОП XP</b>\n\n"+"\n".join(f"{i}. <code>{r['user_id']}</code> @{escape(r['username'] or '-')} — {r['xp']}" for i,r in enumerate(rows,1))
-    await edit_ui(callback, txt,reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2_users")
 async def a2_users(callback: CallbackQuery):
@@ -1915,7 +1873,7 @@ async def a2_users(callback: CallbackQuery):
         ("✉️ Письмо","a2u_msg"),("📄 CSV","a2u_export"),("◀️ Назад","a2_root")]:
         b.button(text=t,callback_data=d)
     b.adjust(2,2,2,2,2,1)
-    await edit_ui(callback, "👥 <b>ЮЗЕРЫ</b>",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("👥 <b>ЮЗЕРЫ</b>",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data == "a2u_list")
 async def a2u_list(callback: CallbackQuery):
@@ -1923,12 +1881,12 @@ async def a2u_list(callback: CallbackQuery):
     con = db(); rows = con.execute("SELECT user_id,username,sd,blocked FROM users ORDER BY id DESC LIMIT 30").fetchall(); con.close()
     txt = "📋 <b>ПОСЛЕДНИЕ 30</b>\n\n"+"\n".join(
         f"{'🚫' if r['blocked'] else '🟢'} <code>{r['user_id']}</code> @{escape(r['username'] or '-')} · {r['sd']} SD" for r in rows)
-    await edit_ui(callback, txt,reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2u_search")
 async def a2u_search(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(A2Search.q); await edit_ui(callback, "🔎 ID или @username:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(A2Search.q); await callback.message.edit_text("🔎 ID или @username:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2Search.q))
 async def a2u_search_do(message: Message, state: FSMContext):
@@ -1955,14 +1913,14 @@ async def a2u_gsd(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     uid = int(callback.data.split(":")[1])
     await state.update_data(uid=uid,mode="give"); await state.set_state(A2SD.val)
-    await edit_ui(callback, f"🎁 Сколько SD для <code>{uid}</code>?",reply_markup=a2_cancel()); await callback.answer()
+    await callback.message.edit_text(f"🎁 Сколько SD для <code>{uid}</code>?",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.callback_query(F.data.startswith("a2u_tsd:"))
 async def a2u_tsd(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     uid = int(callback.data.split(":")[1])
     await state.update_data(uid=uid,mode="take"); await state.set_state(A2SD.val)
-    await edit_ui(callback, f"➖ Сколько забрать?",reply_markup=a2_cancel()); await callback.answer()
+    await callback.message.edit_text(f"➖ Сколько забрать?",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2SD.val))
 async def a2u_sd_val(message: Message, state: FSMContext):
@@ -1982,13 +1940,13 @@ async def a2u_sd_val(message: Message, state: FSMContext):
 async def a2u_give_sd(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.update_data(mode="give"); await state.set_state(A2SD.uid)
-    await edit_ui(callback, "🎁 ID:",reply_markup=a2_cancel()); await callback.answer()
+    await callback.message.edit_text("🎁 ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.callback_query(F.data == "a2u_take_sd")
 async def a2u_take_sd(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.update_data(mode="take"); await state.set_state(A2SD.uid)
-    await edit_ui(callback, "➖ ID:",reply_markup=a2_cancel()); await callback.answer()
+    await callback.message.edit_text("➖ ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2SD.uid))
 async def a2u_sd_uid(message: Message, state: FSMContext):
@@ -2000,7 +1958,7 @@ async def a2u_sd_uid(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "a2u_give_xp")
 async def a2u_give_xp(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(A2XP.uid); await edit_ui(callback, "⭐ ID:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(A2XP.uid); await callback.message.edit_text("⭐ ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2XP.uid))
 async def a2u_xp_uid(message: Message, state: FSMContext):
@@ -2021,7 +1979,7 @@ async def a2u_xp_val(message: Message, state: FSMContext):
 async def a2u_give_premium(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.set_state(A2Premium.uid)
-    await edit_ui(callback, "💎 ID пользователя:",reply_markup=a2_cancel())
+    await callback.message.edit_text("💎 ID пользователя:",reply_markup=a2_cancel())
     await callback.answer()
 
 @dp.callback_query(F.data == "a2u_take_premium")
@@ -2029,7 +1987,7 @@ async def a2u_take_premium(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.set_state(A2Premium.uid)
     await state.update_data(mode="take")
-    await edit_ui(callback, "❌ ID пользователя:",reply_markup=a2_cancel())
+    await callback.message.edit_text("❌ ID пользователя:",reply_markup=a2_cancel())
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("a2u_gp:"))
@@ -2038,7 +1996,7 @@ async def a2u_gp(callback: CallbackQuery, state: FSMContext):
     uid = int(callback.data.split(":")[1])
     await state.update_data(uid=uid, mode="give")
     await state.set_state(A2Premium.hours)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"💎 Премиум для <code>{uid}</code>\n\n"
         "Напиши срок в часах. Например: 24 = 1 день, 48 = 2 дня.\n"
         "Можно любое положительное количество часов.",
@@ -2160,7 +2118,7 @@ async def a2u_msgto(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     uid = int(callback.data.split(":")[1])
     await state.update_data(uid=uid); await state.set_state(A2Msg.text)
-    await edit_ui(callback, f"✉️ Текст для <code>{uid}</code>:",reply_markup=a2_cancel()); await callback.answer()
+    await callback.message.edit_text(f"✉️ Текст для <code>{uid}</code>:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2Msg.text))
 async def a2u_msg_text(message: Message, state: FSMContext):
@@ -2175,7 +2133,7 @@ async def a2u_msg_text(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "a2u_msg")
 async def a2u_msg(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(A2Msg.uid); await edit_ui(callback, "✉️ ID:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(A2Msg.uid); await callback.message.edit_text("✉️ ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2Msg.uid))
 async def a2u_msg_uid(message: Message, state: FSMContext):
@@ -2186,17 +2144,17 @@ async def a2u_msg_uid(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "a2u_block")
 async def a2u_block(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(BlockUser.uid); await edit_ui(callback, "🚫 ID:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(BlockUser.uid); await callback.message.edit_text("🚫 ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.callback_query(F.data == "a2u_unblock")
 async def a2u_unblock(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(UnblockUser.uid); await edit_ui(callback, "🔓 ID:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(UnblockUser.uid); await callback.message.edit_text("🔓 ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.callback_query(F.data == "a2u_reset")
 async def a2u_reset(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(A2Reset.uid); await edit_ui(callback, "🗑 ID:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(A2Reset.uid); await callback.message.edit_text("🗑 ID:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2Reset.uid))
 async def a2u_reset_do(message: Message, state: FSMContext):
@@ -2239,14 +2197,14 @@ async def a2_cases(callback: CallbackQuery):
         [InlineKeyboardButton(text="💰 Изменить цену", callback_data="case_price_start")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="a2_root")],
     ])
-    await edit_ui(callback, txt,reply_markup=kb); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "a2_items")
 async def a2_items(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT id,name,rarity,sell_price FROM items ORDER BY id").fetchall(); con.close()
     txt = "💎 <b>ПРЕДМЕТЫ</b>\n\n"+"\n".join(f"<code>{r['id']}</code> {RARITY.get(r['rarity'],'⚪')} {r['name']} · {r['sell_price']}" for r in rows)
-    await edit_ui(callback, txt,reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2_promo")
 async def a2_promo(callback: CallbackQuery):
@@ -2257,7 +2215,7 @@ async def a2_promo(callback: CallbackQuery):
     b.button(text="➕",callback_data="promo_add"); b.button(text="🗑",callback_data="promo_del")
     b.button(text="🎁 Массово",callback_data="a3_promo_mass")
     b.button(text="◀️ Назад",callback_data="a2_root"); b.adjust(2,1,1)
-    await edit_ui(callback, txt,reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data == "a2_casino")
 async def a2_casino(callback: CallbackQuery):
@@ -2266,7 +2224,7 @@ async def a2_casino(callback: CallbackQuery):
     n = con.execute("SELECT COUNT(*) n FROM casino_bets").fetchone()["n"]
     b = con.execute("SELECT COALESCE(SUM(bet),0) n FROM casino_bets").fetchone()["n"]
     w = con.execute("SELECT COALESCE(SUM(win),0) n FROM casino_bets").fetchone()["n"]; con.close()
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"🎰 <b>КАЗИНО</b>\n\nСтавок: {n}\nОборот: {b} SD\nВыплачено: {w} SD\nПрофит: {b-w} SD",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🏆 Топ",callback_data="a2g_wins")],
@@ -2279,7 +2237,7 @@ async def a2g_wins(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT user_id,game,win FROM casino_bets WHERE win>0 ORDER BY win DESC LIMIT 20").fetchall(); con.close()
     txt = "🏆 <b>ТОП</b>\n\n"+"\n".join(f"<code>{r['user_id']}</code> {r['game']} +{r['win']}" for r in rows)
-    await edit_ui(callback, txt or "Пусто.",reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text(txt or "Пусто.",reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2g_limits")
 async def a2g_limits(callback: CallbackQuery):
@@ -2290,7 +2248,7 @@ async def a2g_limits(callback: CallbackQuery):
         ("duel_min","Мин дуэли"),("duel_commission","Комиссия дуэли")]:
         b.button(text=f"{name}: {get_limit(key)}",callback_data=f"a3le:{key}")
     b.button(text="◀️ Назад",callback_data="a2_casino"); b.adjust(1)
-    await edit_ui(callback, "💵 <b>ЛИМИТЫ КАЗИНО</b>\n\nНажми, чтобы изменить:",reply_markup=b.as_markup())
+    await callback.message.edit_text("💵 <b>ЛИМИТЫ КАЗИНО</b>\n\nНажми, чтобы изменить:",reply_markup=b.as_markup())
     await callback.answer()
 
 @dp.callback_query(F.data == "a2_logs")
@@ -2298,7 +2256,7 @@ async def a2_logs(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT created_at,action,target_user_id FROM admin_logs ORDER BY id DESC LIMIT 30").fetchall(); con.close()
     txt = "📜 <b>ЛОГИ</b>\n\n"+"\n".join(f"{r['created_at'][:19]} {r['action']} {r['target_user_id'] or '-'}" for r in rows)
-    await edit_ui(callback, txt or "Пусто.",reply_markup=a2_root_kb()); await callback.answer()
+    await callback.message.edit_text(txt or "Пусто.",reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2_maint")
 async def a2_maint(callback: CallbackQuery):
@@ -2308,7 +2266,7 @@ async def a2_maint(callback: CallbackQuery):
         [InlineKeyboardButton(text="🔄 Пересчёт Lv",callback_data="a2m_lvl")],
         [InlineKeyboardButton(text="📊 Записей",callback_data="a2m_count")],
         [InlineKeyboardButton(text="◀️ Назад",callback_data="a2_root")]])
-    await edit_ui(callback, "🛠 <b>СЕРВИС</b>",reply_markup=kb); await callback.answer()
+    await callback.message.edit_text("🛠 <b>СЕРВИС</b>",reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "a2m_lvl")
 async def a2m_lvl(callback: CallbackQuery):
@@ -2325,7 +2283,7 @@ async def a2m_count(callback: CallbackQuery):
         try:
             n = con.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]; txt += f"{t}: {n}\n"
         except Exception: pass
-    con.close(); await edit_ui(callback, txt,reply_markup=a2_root_kb()); await callback.answer()
+    con.close(); await callback.message.edit_text(txt,reply_markup=a2_root_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a2_maintenance")
 async def a2_maintenance(callback: CallbackQuery, state: FSMContext):
@@ -2336,13 +2294,13 @@ async def a2_maintenance(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🟢 Включить бота", callback_data="a2_maintenance_off")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="a2_root")],
         ])
-        await edit_ui(callback, 
+        await callback.message.edit_text(
             "🔴 <b>ТЕХРАБОТЫ УЖЕ ВКЛЮЧЕНЫ</b>\n\n" + maintenance_text(),
             reply_markup=enabled,
         )
     else:
         await state.set_state(A2Maintenance.reason)
-        await edit_ui(callback, 
+        await callback.message.edit_text(
             "🔴 <b>ВЫКЛЮЧЕНИЕ БОТА ДЛЯ ИГРОКОВ</b>\n\n"
             "Напиши причину техработ.\n\n"
             "Например: <i>Обновление COS-DROP</i>",
@@ -2403,7 +2361,7 @@ async def a2_maintenance_off(callback: CallbackQuery, state: FSMContext):
     setting_set("maintenance_enabled", "0")
     setting_set("maintenance_until", "")
     log_admin("maintenance_off")
-    await edit_ui(callback, "🟢 <b>БОТ СНОВА ДОСТУПЕН ИГРОКАМ</b>", reply_markup=a2_root_kb())
+    await callback.message.edit_text("🟢 <b>БОТ СНОВА ДОСТУПЕН ИГРОКАМ</b>", reply_markup=a2_root_kb())
     await callback.answer("✅ Бот включён")
 
 @dp.callback_query(F.data == "a2_wipe")
@@ -2413,7 +2371,7 @@ async def a2_wipe(callback: CallbackQuery):
         [InlineKeyboardButton(text="☢️ ДА, СБРОСИТЬ ВСЁ", callback_data="a2_wipe_confirm")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="a2_root")],
     ])
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         "☢️ <b>ПОЛНЫЙ WIPE ИГРОКОВ</b>\n\n"
         "Будут удалены/сброшены данные ВСЕХ игроков:\n"
         "💰 SD\n🎒 коллекции\n⭐ XP и уровни\n"
@@ -2477,7 +2435,7 @@ async def a2_wipe_confirm(callback: CallbackQuery):
     con.close()
 
     log_admin("FULL_WIPE_PROGRESS", details=f"players_reset={player_count};starter_sd={starter_sd}")
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         "☢️ <b>СБРОС ИГРОКОВ ЗАВЕРШЁН</b>\n\n"
         f"👥 Сброшено игроков: <b>{player_count}</b>\n"
         f"💰 Баланс → <b>{starter_sd} SD</b>\n"
@@ -2501,7 +2459,7 @@ async def a2_wipe_confirm(callback: CallbackQuery):
 @dp.callback_query(F.data == "a2_broadcast")
 async def a2_broadcast(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
-    await state.set_state(A2Broadcast.text); await edit_ui(callback, "📢 Текст:",reply_markup=a2_cancel()); await callback.answer()
+    await state.set_state(A2Broadcast.text); await callback.message.edit_text("📢 Текст:",reply_markup=a2_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A2Broadcast.text))
 async def a2_broadcast_do(message: Message, state: FSMContext):
@@ -2549,7 +2507,7 @@ def a3_cancel():
 async def a3_root(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.clear()
-    await edit_ui(callback, "⚙️ <b>ЛИМИТЫ</b>",reply_markup=a3_kb()); await callback.answer()
+    await callback.message.edit_text("⚙️ <b>ЛИМИТЫ</b>",reply_markup=a3_kb()); await callback.answer()
 
 @dp.callback_query(F.data.startswith("a3lg:"))
 async def a3_lg(callback: CallbackQuery):
@@ -2559,7 +2517,7 @@ async def a3_lg(callback: CallbackQuery):
     for key,name in LIMIT_GROUPS.get(grp,[]):
         b.button(text=f"{name}: {get_limit(key)}",callback_data=f"a3le:{key}")
     b.button(text="◀️ Назад",callback_data="a3_root"); b.adjust(1)
-    await edit_ui(callback, "⚙️ Выбери лимит:",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("⚙️ Выбери лимит:",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data.startswith("a3le:"))
 async def a3_le(callback: CallbackQuery, state: FSMContext):
@@ -2569,7 +2527,7 @@ async def a3_le(callback: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Сброс к дефолту",callback_data=f"a3ld:{key}")],
         [InlineKeyboardButton(text="❌ Отмена",callback_data="a2_root")]])
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"⚙️ <b>{key}</b>\n\nТекущее: <b>{get_limit(key)}</b>\nДефолт: <b>{LIMIT_DEFAULTS.get(key)}</b>\n\n"
         f"Отправь новое число или /a3d:",reply_markup=kb)
     await callback.answer()
@@ -2625,7 +2583,7 @@ async def a3_showall(callback: CallbackQuery):
             mark = "🟢" if v == d else "🟡"
             txt += f"{mark} {n}: <b>{v}</b>\n"
         txt += "\n"
-    await edit_ui(callback, txt,reply_markup=a3_kb()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=a3_kb()); await callback.answer()
 
 @dp.callback_query(F.data == "a3l_resetall")
 async def a3_resetall(callback: CallbackQuery):
@@ -2646,7 +2604,7 @@ async def a3_econ(callback: CallbackQuery):
     b.button(text="🎁 Начислить всем",callback_data="a3e_add")
     b.button(text="➖ Списать у всех",callback_data="a3e_take")
     b.button(text="◀️ Назад",callback_data="a2_root"); b.adjust(1)
-    await edit_ui(callback, 
+    await callback.message.edit_text(
         f"💰 <b>ЭКОНОМИКА</b>\n\nМасса SD: <b>{mass}</b>\n🐋 Богачей: {rich}\n🥚 Бедных: {poor}",
         reply_markup=b.as_markup()); await callback.answer()
 
@@ -2656,7 +2614,7 @@ async def a3e_wipe(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ ДА",callback_data="a3e_wipe_ok")],
         [InlineKeyboardButton(text="❌ Отмена",callback_data="a3_econ")]])
-    await edit_ui(callback, "⚠️ Обнулить SD у всех?",reply_markup=kb); await callback.answer()
+    await callback.message.edit_text("⚠️ Обнулить SD у всех?",reply_markup=kb); await callback.answer()
 
 @dp.callback_query(F.data == "a3e_wipe_ok")
 async def a3e_wipe_ok(callback: CallbackQuery):
@@ -2668,13 +2626,13 @@ async def a3e_wipe_ok(callback: CallbackQuery):
 async def a3e_add(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.update_data(mode="add"); await state.set_state(A3Mass.amount)
-    await edit_ui(callback, "🎁 Сколько начислить всем?",reply_markup=a3_cancel()); await callback.answer()
+    await callback.message.edit_text("🎁 Сколько начислить всем?",reply_markup=a3_cancel()); await callback.answer()
 
 @dp.callback_query(F.data == "a3e_take")
 async def a3e_take(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.update_data(mode="take"); await state.set_state(A3Mass.amount)
-    await edit_ui(callback, "➖ Сколько списать у всех?",reply_markup=a3_cancel()); await callback.answer()
+    await callback.message.edit_text("➖ Сколько списать у всех?",reply_markup=a3_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A3Mass.amount))
 async def a3_mass_sd(message: Message, state: FSMContext):
@@ -2697,13 +2655,13 @@ async def a3_mass(callback: CallbackQuery):
     b.button(text="🎁 Предмет активным",callback_data="a3m_item")
     b.button(text="🎟 Промо массово",callback_data="a3_promo_mass")
     b.button(text="◀️ Назад",callback_data="a2_root"); b.adjust(1)
-    await edit_ui(callback, "🎯 <b>МАССОВЫЕ</b>",reply_markup=b.as_markup()); await callback.answer()
+    await callback.message.edit_text("🎯 <b>МАССОВЫЕ</b>",reply_markup=b.as_markup()); await callback.answer()
 
 @dp.callback_query(F.data == "a3_promo_mass")
 async def a3_promo_mass(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id): return
     await state.set_state(A3PromoMass.count)
-    await edit_ui(callback, "🎟 Сколько промокодов? (1-100)",reply_markup=a3_cancel()); await callback.answer()
+    await callback.message.edit_text("🎟 Сколько промокодов? (1-100)",reply_markup=a3_cancel()); await callback.answer()
 
 @dp.message(StateFilter(A3PromoMass.count))
 async def a3_promo_mass_count(message: Message, state: FSMContext):
@@ -2773,7 +2731,7 @@ async def a3_diag(callback: CallbackQuery):
             n = con.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]; txt += f"{t}: {n}\n"
         except Exception as e: txt += f"❌ {t}: {e}\n"
     con.close(); txt += f"\nDB: <code>{DB_FILE}</code>"
-    await edit_ui(callback, txt,reply_markup=a3_kb()); await callback.answer()
+    await callback.message.edit_text(txt,reply_markup=a3_kb()); await callback.answer()
 
 # ========== FALLBACK ==========
 @dp.message(StateFilter(None))
