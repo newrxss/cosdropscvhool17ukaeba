@@ -1,4 +1,3 @@
-
 import asyncio, json, logging, os, random, re, sqlite3, string
 from datetime import datetime, timezone, timedelta
 from html import escape
@@ -1644,8 +1643,31 @@ async def adm_promo(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕",callback_data="promo_add"),InlineKeyboardButton(text="🗑",callback_data="promo_del")],
         [InlineKeyboardButton(text="🎁 Массово",callback_data="a3_promo_mass")],
+        [InlineKeyboardButton(text="🗑️ Удалить ВСЕ",callback_data="promo_delete_all")],
         [InlineKeyboardButton(text="◀️",callback_data="admin_home")]])
     await callback.message.edit_text(f"🎟 <b>ПРОМО</b>\n\n{txt}",reply_markup=kb); await callback.answer()
+
+@dp.callback_query(F.data == "promo_delete_all")
+async def promo_delete_all(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return
+    con = db()
+    try:
+        count = int(con.execute("SELECT COUNT(*) AS n FROM promo_codes").fetchone()["n"] or 0)
+        con.execute("DELETE FROM promo_uses")
+        con.execute("DELETE FROM promo_codes")
+        con.commit()
+    finally:
+        con.close()
+    log_admin("delete_all_promos", details=f"count={count}")
+    await callback.message.edit_text(
+        f"🗑️ <b>ВСЕ ПРОМОКОДЫ УДАЛЕНЫ</b>\n\nУдалено: <b>{count}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎟 Промокоды", callback_data="adm_promo")],
+            [InlineKeyboardButton(text="◀️ Админ-панель", callback_data="admin_home")]
+        ])
+    )
+    await callback.answer("Все промокоды удалены.", show_alert=True)
+
 
 @dp.callback_query(F.data == "promo_add")
 async def promo_add(callback: CallbackQuery, state: FSMContext):
