@@ -8,7 +8,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery)
+    InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery, WebAppInfo)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -446,7 +446,11 @@ def home_kb(user=None):
         ("👥 Рефералы","ref"),("💎 CosDrop+","subscribe"),("📝 Заявки","apps"),
         ("ℹ️ О боте","about")]:
         b.button(text=t,callback_data=d)
-    b.adjust(2,2,2,2,2,2,2,1,1); return b.as_markup()
+    b.adjust(2,2,2,2,2,2,2,1,1)
+    webapp_url = os.getenv("WEBAPP_URL", "").strip()
+    if webapp_url.startswith("https://"):
+        b.row(InlineKeyboardButton(text="🌐 Открыть COS-DROP Web", web_app=WebAppInfo(url=webapp_url)))
+    return b.as_markup()
 
 def back(cb="home"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад",callback_data=cb)]])
@@ -1823,7 +1827,11 @@ def a2_root_kb():
         ("📁 Экспорт","a3_export"),("🛠 Диагностика","a3_diag"),
         ("❌ Закрыть","a2_close"),("◀️ Админка v1","admin_home")]:
         b.button(text=t,callback_data=d)
-    b.adjust(2,2,2,2,2,2,2,1,1); return b.as_markup()
+    b.adjust(2,2,2,2,2,2,2,1,1)
+    webapp_url = os.getenv("WEBAPP_URL", "").strip()
+    if webapp_url.startswith("https://"):
+        b.row(InlineKeyboardButton(text="🌐 Открыть COS-DROP Web", web_app=WebAppInfo(url=webapp_url)))
+    return b.as_markup()
 
 def a2_cancel():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена",callback_data="a2_root")]])
@@ -2774,7 +2782,8 @@ async def fallback(message: Message):
 async def main():
     init_db()
     logging.info("COS-DROP started | DB=%s",DB_FILE)
-    await dp.start_polling(bot)
+    from webapp_api import start_web_server
+    await asyncio.gather(dp.start_polling(bot), start_web_server())
 
 if __name__ == "__main__":
     asyncio.run(main())
