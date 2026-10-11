@@ -8,7 +8,7 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardButton,
-    InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery, WebAppInfo)
+    InlineKeyboardMarkup, FSInputFile, LabeledPrice, PreCheckoutQuery)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -128,6 +128,11 @@ class A2Maintenance(StatesGroup): reason=State(); duration=State()
 class A3Limit(StatesGroup): key=State()
 class A3Mass(StatesGroup): mode=State(); amount=State()
 class A3PromoMass(StatesGroup): count=State(); reward=State()
+class SeasonCreate(StatesGroup): title=State(); description=State(); days=State()
+class EventCreate(StatesGroup): title=State(); description=State(); reward=State(); audience=State(); ids=State()
+class QuestCreate(StatesGroup): title=State(); description=State(); goal_type=State(); goal=State(); reward=State(); audience=State(); ids=State()
+class TournamentCreate(StatesGroup): title=State(); entry_fee=State(); prize1=State(); prize2=State(); prize3=State(); audience=State(); ids=State()
+class TournamentFinish(StatesGroup): places=State()
 
 # ========== БД ==========
 def init_db():
@@ -178,6 +183,28 @@ def init_db():
     CREATE TABLE IF NOT EXISTS duels(id INTEGER PRIMARY KEY AUTOINCREMENT, challenger_id INTEGER,
         opponent_id INTEGER, amount INTEGER, status TEXT DEFAULT 'pending', winner_id INTEGER,
         created_at TEXT, finished_at TEXT);
+    CREATE TABLE IF NOT EXISTS seasons(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+        description TEXT DEFAULT '', starts_at TEXT, ends_at TEXT, status TEXT DEFAULT 'active', created_at TEXT);
+    CREATE TABLE IF NOT EXISTS season_events(id INTEGER PRIMARY KEY AUTOINCREMENT, season_id INTEGER,
+        title TEXT NOT NULL, description TEXT DEFAULT '', reward_sd INTEGER DEFAULT 0,
+        audience TEXT DEFAULT 'all', audience_ids TEXT DEFAULT '', enabled INTEGER DEFAULT 1,
+        created_at TEXT, ends_at TEXT);
+    CREATE TABLE IF NOT EXISTS season_event_claims(event_id INTEGER, user_id INTEGER, claimed_at TEXT,
+        PRIMARY KEY(event_id,user_id));
+    CREATE TABLE IF NOT EXISTS season_quests(id INTEGER PRIMARY KEY AUTOINCREMENT, season_id INTEGER,
+        title TEXT NOT NULL, description TEXT DEFAULT '', goal_type TEXT NOT NULL, goal INTEGER DEFAULT 1,
+        reward_sd INTEGER DEFAULT 0, audience TEXT DEFAULT 'all', audience_ids TEXT DEFAULT '',
+        enabled INTEGER DEFAULT 1, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS season_quest_progress(user_id INTEGER, quest_id INTEGER,
+        progress INTEGER DEFAULT 0, claimed INTEGER DEFAULT 0, updated_at TEXT,
+        PRIMARY KEY(user_id,quest_id));
+    CREATE TABLE IF NOT EXISTS tournaments(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+        entry_fee INTEGER DEFAULT 0, prize1 INTEGER DEFAULT 0, prize2 INTEGER DEFAULT 0,
+        prize3 INTEGER DEFAULT 0, audience TEXT DEFAULT 'all', audience_ids TEXT DEFAULT '',
+        status TEXT DEFAULT 'open', created_at TEXT, finished_at TEXT);
+    CREATE TABLE IF NOT EXISTS tournament_participants(tournament_id INTEGER, user_id INTEGER,
+        joined_at TEXT, place INTEGER, reward_paid INTEGER DEFAULT 0,
+        PRIMARY KEY(tournament_id,user_id));
     """)
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('maintenance_enabled','0')")
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('maintenance_reason','Технические работы')")
@@ -444,13 +471,10 @@ def home_kb(user=None):
         ("🎒 Коллекция","collection"),("🏆 Рейтинг","rating"),("🎟 Промокод","promo"),
         ("🏅 Достижения","achievements"),("📋 Задания","tasks"),("⚔️ Дуэли","duels"),
         ("👥 Рефералы","ref"),("💎 CosDrop+","subscribe"),("📝 Заявки","apps"),
-        ("ℹ️ О боте","about")]:
+        ("🌟 Сезон","season_info"),("🎉 События","season_events"),("🎯 Сезонные квесты","season_quests"),
+        ("🏆 Турниры","tournaments_user"),("ℹ️ О боте","about")]:
         b.button(text=t,callback_data=d)
-    b.adjust(2,2,2,2,2,2,2,1,1)
-    webapp_url = os.getenv("WEBAPP_URL", "").strip()
-    if webapp_url.startswith("https://"):
-        b.row(InlineKeyboardButton(text="🌐 Открыть COS-DROP Web", web_app=WebAppInfo(url=webapp_url)))
-    return b.as_markup()
+    b.adjust(2,2,2,2,2,2,2,1,1); return b.as_markup()
 
 def back(cb="home"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад",callback_data=cb)]])
@@ -593,6 +617,7 @@ async def open_case(callback: CallbackQuery):
     if err: return await callback.answer(err,show_alert=True)
     s = res[0]
     await check_achievements(callback.from_user.id); await bump_task(callback.from_user.id,"open5",1)
+    await add_season_progress(callback.from_user.id, "case_opens", 1)
     await callback.message.edit_text(
         f"✨ <b>ОТКРЫТИЕ</b>\n\n{RARITY.get(s['rarity'],'⚪')}\n\n<b>{escape(s['name'])}</b>\n\n🎒 +10 XP",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -610,6 +635,7 @@ async def open_case_5(callback: CallbackQuery):
     if err: return await callback.answer(err,show_alert=True)
     text = "✨ <b>×5</b>\n\n"+"\n".join(f"{RARITY.get(r['rarity'],'⚪')} <b>{escape(r['name'])}</b>" for r in res)
     await check_achievements(callback.from_user.id); await bump_task(callback.from_user.id,"open5",5)
+    await add_season_progress(callback.from_user.id, "case_opens", 5)
     await callback.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎮 Ещё",callback_data="play")],
         [InlineKeyboardButton(text="🏠 Меню",callback_data="home")]]))
@@ -733,6 +759,7 @@ async def daily(callback: CallbackQuery):
     if has_sub(row): reward *= SUB_BONUS["daily_mult"]
     con.execute("UPDATE users SET sd=sd+?, daily_claim=?, daily_streak=?, xp=xp+5, last_activity=? WHERE user_id=?",
         (reward,t,streak,now(),callback.from_user.id)); con.commit(); con.close()
+    await add_season_progress(callback.from_user.id, "daily_claims", 1)
     await callback.answer(f"🎁 +{reward} SD · Стрик: {streak}",show_alert=True); await balance(callback)
 
 # ========== TOPUP / STARS / SUB ==========
@@ -815,6 +842,11 @@ def _log_bet(uid,game,bet,win):
         total_lost=total_lost+excluded.total_lost, biggest_win=MAX(biggest_win,excluded.biggest_win)""",
         (uid,1,win if profit>0 else 0,bet if profit<0 else 0,win if profit>0 else 0))
     con.commit(); con.close()
+    try:
+        # Counts a completed casino round toward season quests.
+        asyncio.create_task(add_season_progress(uid, "casino_bets", 1))
+    except Exception:
+        pass
 
 def _check_loss_limit(uid,bet):
     con = db(); r = con.execute("SELECT daily_loss, daily_loss_date FROM users WHERE user_id=?",(uid,)).fetchone(); con.close()
@@ -1822,16 +1854,13 @@ def a2_root_kb():
         ("🎰 Казино","a2_casino"),("📜 Логи","a2_logs"),("🛠 Сервис","a2_maint"),
         ("📢 Рассылка","a2_broadcast"),("⚙️ Лимиты","a3_root"),
         ("💰 Экономика","a3_econ"),("🎯 Массовые","a3_mass"),
+        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),
         ("🔴 Выключить бота","a2_maintenance"),
         ("☢️ Сбросить ВСЁ у игроков","a2_wipe"),
         ("📁 Экспорт","a3_export"),("🛠 Диагностика","a3_diag"),
         ("❌ Закрыть","a2_close"),("◀️ Админка v1","admin_home")]:
         b.button(text=t,callback_data=d)
-    b.adjust(2,2,2,2,2,2,2,1,1)
-    webapp_url = os.getenv("WEBAPP_URL", "").strip()
-    if webapp_url.startswith("https://"):
-        b.row(InlineKeyboardButton(text="🌐 Открыть COS-DROP Web", web_app=WebAppInfo(url=webapp_url)))
-    return b.as_markup()
+    b.adjust(2,2,2,2,2,2,2,1,1); return b.as_markup()
 
 def a2_cancel():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена",callback_data="a2_root")]])
@@ -2754,7 +2783,8 @@ async def a3_diag(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db()
     tables = ["users","cases","items","inventory","case_opens","admin_logs",
-              "casino_bets","duels","withdraws","promo_codes","settings"]
+              "casino_bets","duels","withdraws","promo_codes","settings",
+              "seasons","season_events","season_quests","tournaments","tournament_participants"]
     txt = "🛠 <b>ДИАГНОСТИКА</b>\n\n"
     for t in tables:
         try:
@@ -2762,6 +2792,504 @@ async def a3_diag(callback: CallbackQuery):
         except Exception as e: txt += f"❌ {t}: {e}\n"
     con.close(); txt += f"\nDB: <code>{DB_FILE}</code>"
     await callback.message.edit_text(txt,reply_markup=a3_kb()); await callback.answer()
+
+# ========== SEASONS / EVENTS / QUESTS / TOURNAMENTS ==========
+def season_admin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌟 Создать сезон", callback_data="season_create"), InlineKeyboardButton(text="⏹ Завершить сезон", callback_data="season_end")],
+        [InlineKeyboardButton(text="📚 История сезонов", callback_data="season_history")],
+        [InlineKeyboardButton(text="🎉 События", callback_data="season_admin_events"), InlineKeyboardButton(text="➕ Создать событие", callback_data="event_create")],
+        [InlineKeyboardButton(text="🎯 Квесты", callback_data="season_admin_quests"), InlineKeyboardButton(text="➕ Создать квест", callback_data="quest_create")],
+        [InlineKeyboardButton(text="🏆 Турниры", callback_data="season_admin_tournaments"), InlineKeyboardButton(text="➕ Создать турнир", callback_data="tournament_create")],
+        [InlineKeyboardButton(text="◀️ Админ-панель", callback_data="a2_root")]])
+
+def audience_kb(prefix):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Всем игрокам", callback_data=f"{prefix}_aud:all")],
+        [InlineKeyboardButton(text="🎯 Выбранным ID", callback_data=f"{prefix}_aud:some")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="a2_season")]])
+
+def parse_ids(raw):
+    ids=[]
+    for part in re.split(r"[,;\s]+", raw.strip()):
+        if part.isdigit() and int(part)>0 and int(part) not in ids: ids.append(int(part))
+    return ids[:500]
+
+def is_target(audience, audience_ids, uid):
+    if audience == "all": return True
+    try: return int(uid) in [int(x) for x in json.loads(audience_ids or "[]")]
+    except Exception: return False
+
+async def notify_audience(audience, audience_ids, text, reply_markup=None):
+    con=db()
+    if audience == "all":
+        rows=con.execute("SELECT user_id FROM users WHERE blocked=0").fetchall()
+        ids=[int(r["user_id"]) for r in rows]
+    else:
+        try: ids=[int(x) for x in json.loads(audience_ids or "[]")]
+        except Exception: ids=[]
+    con.close(); sent=0; failed=0
+    for uid in ids:
+        try:
+            await bot.send_message(uid,text,reply_markup=reply_markup)
+            sent+=1
+        except Exception:
+            failed+=1
+        await asyncio.sleep(0.05)
+    return sent,failed
+
+async def add_season_progress(uid, goal_type, amount=1):
+    con=db()
+    rows=con.execute("SELECT * FROM season_quests WHERE enabled=1 AND goal_type=?",(goal_type,)).fetchall()
+    changed=[]
+    for q in rows:
+        if not is_target(q["audience"],q["audience_ids"],uid): continue
+        con.execute("INSERT OR IGNORE INTO season_quest_progress(user_id,quest_id,progress,claimed,updated_at) VALUES(?,?,0,0,?)",(uid,q["id"],now()))
+        pr=con.execute("SELECT progress,claimed FROM season_quest_progress WHERE user_id=? AND quest_id=?",(uid,q["id"])).fetchone()
+        if pr and not pr["claimed"]:
+            old=int(pr["progress"])
+            new=min(int(q["goal"]),old+int(amount))
+            con.execute("UPDATE season_quest_progress SET progress=?,updated_at=? WHERE user_id=? AND quest_id=?",(new,now(),uid,q["id"]))
+            if old<int(q["goal"]) and new>=int(q["goal"]): changed.append(q["title"])
+    con.commit(); con.close()
+    for title in changed:
+        try: await bot.send_message(uid,f"🎯 Квест выполнен: <b>{escape(title)}</b>\nОткрой «Сезонные квесты», чтобы забрать награду.")
+        except Exception: pass
+
+@dp.callback_query(F.data == "a2_season")
+async def a2_season(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.clear()
+    con=db()
+    season=con.execute("SELECT * FROM seasons WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+    ev=con.execute("SELECT COUNT(*) n FROM season_events WHERE enabled=1").fetchone()["n"]
+    qs=con.execute("SELECT COUNT(*) n FROM season_quests WHERE enabled=1").fetchone()["n"]
+    ts=con.execute("SELECT COUNT(*) n FROM tournaments WHERE status='open'").fetchone()["n"]
+    con.close()
+    txt="🏆 <b>УПРАВЛЕНИЕ СЕЗОНОМ</b>\n\n"
+    if season: txt+=f"🌟 Активный сезон: <b>{escape(season['title'])}</b>\nДо: <code>{escape((season['ends_at'] or '')[:16])}</code>\n"
+    else: txt+="🌟 Активный сезон: <i>не создан</i>\n"
+    txt+=f"\n🎉 Активных событий: <b>{ev}</b>\n🎯 Активных квестов: <b>{qs}</b>\n🏆 Открытых турниров: <b>{ts}</b>\n\nВыбери раздел управления."
+    await callback.message.edit_text(txt,reply_markup=season_admin_kb()); await callback.answer()
+
+@dp.callback_query(F.data == "season_info")
+async def season_info(callback:CallbackQuery):
+    con=db();season=con.execute("SELECT * FROM seasons WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+    if not season:
+        con.close()
+        await callback.message.edit_text("🌟 <b>СЕЗОН COS-DROP</b>\n\nСейчас активного сезона нет.",reply_markup=back("home"))
+        await callback.answer()
+        return
+    events=con.execute("SELECT COUNT(*) n FROM season_events WHERE enabled=1 AND (season_id=? OR season_id IS NULL)",(season['id'],)).fetchone()['n']
+    quests=con.execute("SELECT COUNT(*) n FROM season_quests WHERE enabled=1 AND (season_id=? OR season_id IS NULL)",(season['id'],)).fetchone()['n']
+    con.close()
+    await callback.message.edit_text(f"🌟 <b>{escape(season['title'])}</b>\n\n{escape(season['description'] or '')}\n\n🗓 Начало: <code>{escape((season['starts_at'] or '')[:10])}</code>\n⏳ Окончание: <code>{escape((season['ends_at'] or '')[:10])}</code>\n🎉 Событий: {events}\n🎯 Квестов: {quests}",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎉 События",callback_data="season_events")],[InlineKeyboardButton(text="🎯 Квесты",callback_data="season_quests")],[InlineKeyboardButton(text="🏆 Турниры",callback_data="tournaments_user")],[InlineKeyboardButton(text="◀️ Меню",callback_data="home")]]))
+    await callback.answer()
+
+@dp.callback_query(F.data == "season_history")
+async def season_history(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    con=db();rows=con.execute("SELECT * FROM seasons ORDER BY id DESC LIMIT 15").fetchall();con.close()
+    txt="📚 <b>ИСТОРИЯ СЕЗОНОВ</b>\n\n"+("\n\n".join(f"#{r['id']} · {'🟢 активен' if r['status']=='active' else '🏁 завершён'}\n<b>{escape(r['title'])}</b>\n{escape((r['starts_at'] or '')[:10])} — {escape((r['ends_at'] or '')[:10])}" for r in rows) or "Сезонов пока нет.")
+    await callback.message.edit_text(txt,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад",callback_data="a2_season")]]));await callback.answer()
+
+@dp.callback_query(F.data == "season_end")
+async def season_end(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    con=db();r=con.execute("SELECT * FROM seasons WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone()
+    if not r:con.close();return await callback.answer("Нет активного сезона.",show_alert=True)
+    con.execute("UPDATE seasons SET status='finished',ends_at=? WHERE id=?",(now(),r['id']));con.commit();con.close()
+    log_admin("season_end",details=f"id={r['id']}")
+    await callback.message.edit_text(f"🏁 Сезон <b>{escape(r['title'])}</b> завершён.",reply_markup=season_admin_kb());await callback.answer("Сезон завершён.")
+
+@dp.callback_query(F.data == "season_create")
+async def season_create(callback: CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.clear(); await state.set_state(SeasonCreate.title)
+    await callback.message.edit_text("🌟 <b>Новый сезон</b>\n\nОтправь название сезона.",reply_markup=a2_cancel()); await callback.answer()
+
+@dp.message(StateFilter(SeasonCreate.title))
+async def season_title(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id): return
+    title=(message.text or "").strip()[:80]
+    if not title:return await message.answer("Название не может быть пустым.")
+    await state.update_data(title=title); await state.set_state(SeasonCreate.description)
+    await message.answer("Напиши описание сезона (или отправь - чтобы пропустить).")
+
+@dp.message(StateFilter(SeasonCreate.description))
+async def season_description(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id): return
+    await state.update_data(description="" if (message.text or "").strip()=="-" else (message.text or "").strip()[:500])
+    await state.set_state(SeasonCreate.days); await message.answer("На сколько дней сезон? Напиши число от 1 до 365.")
+
+@dp.message(StateFilter(SeasonCreate.days))
+async def season_days(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id): return
+    try: days=int((message.text or "").strip())
+    except Exception:return await message.answer("Введи число дней от 1 до 365.")
+    if not 1<=days<=365:return await message.answer("Введи число дней от 1 до 365.")
+    d=await state.get_data(); start=datetime.now(timezone.utc); end=start+timedelta(days=days)
+    con=db(); con.execute("UPDATE seasons SET status='finished' WHERE status='active'")
+    cur=con.execute("INSERT INTO seasons(title,description,starts_at,ends_at,status,created_at) VALUES(?,?,?,?,?,?)",(d['title'],d.get('description',''),start.isoformat(),end.isoformat(),'active',now()))
+    sid=cur.lastrowid; con.commit(); con.close(); await state.clear(); log_admin("season_create",details=f"id={sid}; title={d['title']}; days={days}")
+    await message.answer(f"🌟 <b>Сезон запущен!</b>\n\n<b>{escape(d['title'])}</b>\nДлительность: {days} дн.\nОкончание: <code>{end.strftime('%Y-%m-%d %H:%M UTC')}</code>",reply_markup=season_admin_kb())
+    await notify_audience("all","[]",f"🌟 <b>НОВЫЙ СЕЗОН COS-DROP!</b>\n\n<b>{escape(d['title'])}</b>\n{escape(d.get('description',''))}\n\nСезон продлится {days} дн. Заглядывай в меню, чтобы участвовать в событиях и квестах.")
+
+@dp.callback_query(F.data == "season_admin_events")
+async def season_admin_events(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    con=db(); rows=con.execute("SELECT * FROM season_events ORDER BY id DESC LIMIT 15").fetchall(); con.close()
+    txt="🎉 <b>СОБЫТИЯ</b>\n\n"+("\n".join(f"#{r['id']} {'🟢' if r['enabled'] else '⚫'} <b>{escape(r['title'])}</b> · +{r['reward_sd']} SD · {'всем' if r['audience']=='all' else 'выбранным'}" for r in rows) or "Событий пока нет.")
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🔴 Выключить' if r['enabled'] else '🟢 Включить'} #{r['id']}",callback_data=f"event_toggle:{r['id']}")] for r in rows]+[[InlineKeyboardButton(text="➕ Создать",callback_data="event_create")],[InlineKeyboardButton(text="◀️ Назад",callback_data="a2_season")]])
+    await callback.message.edit_text(txt,reply_markup=kb); await callback.answer()
+
+@dp.callback_query(F.data.startswith("event_toggle:"))
+async def event_toggle(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    eid=int(callback.data.split(":")[1]); con=db(); con.execute("UPDATE season_events SET enabled=CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=?",(eid,)); con.commit(); con.close()
+    await season_admin_events(callback)
+
+@dp.callback_query(F.data == "event_create")
+async def event_create(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.clear(); await state.set_state(EventCreate.title)
+    await callback.message.edit_text("🎉 <b>Создание события</b>\n\nОтправь название события.",reply_markup=a2_cancel()); await callback.answer()
+
+@dp.message(StateFilter(EventCreate.title))
+async def event_title(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    title=(message.text or "").strip()[:80]
+    if not title:return await message.answer("Название не может быть пустым.")
+    await state.update_data(title=title); await state.set_state(EventCreate.description); await message.answer("Описание события (или - чтобы пропустить).")
+
+@dp.message(StateFilter(EventCreate.description))
+async def event_description(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await state.update_data(description="" if (message.text or "").strip()=="-" else (message.text or "").strip()[:700]); await state.set_state(EventCreate.reward)
+    await message.answer("Сколько SD выдавать за участие? Введи 0 или положительное число.")
+
+@dp.message(StateFilter(EventCreate.reward))
+async def event_reward(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    try:v=int((message.text or "").strip())
+    except Exception:return await message.answer("Введи целое число SD.")
+    if v<0 or v>100000000:return await message.answer("Награда должна быть от 0 до 100 000 000 SD.")
+    await state.update_data(reward=v); await state.set_state(EventCreate.audience)
+    await message.answer("Кому отправить событие?",reply_markup=audience_kb("event"))
+
+@dp.callback_query(F.data.startswith("event_aud:"))
+async def event_audience(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    audience=callback.data.split(":")[1]; await state.update_data(audience=audience)
+    if audience=="some":
+        await state.set_state(EventCreate.ids); await callback.message.edit_text("Отправь Telegram ID игроков через пробел или запятую.",reply_markup=a2_cancel()); await callback.answer(); return
+    await save_event(callback.message,state,[]); await callback.answer()
+
+@dp.message(StateFilter(EventCreate.ids))
+async def event_ids(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    ids=parse_ids(message.text or "")
+    if not ids:return await message.answer("Не нашёл ID. Отправь числовые Telegram ID через пробел или запятую.")
+    await save_event(message,state,ids)
+
+async def save_event(message,state,ids):
+    d=await state.get_data(); aud=d.get('audience','all'); ids_json=json.dumps(ids)
+    con=db(); season=con.execute("SELECT id FROM seasons WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone(); sid=season['id'] if season else None
+    cur=con.execute("INSERT INTO season_events(season_id,title,description,reward_sd,audience,audience_ids,enabled,created_at) VALUES(?,?,?,?,?,?,1,?)",(sid,d['title'],d.get('description',''),d['reward'],aud,ids_json,now()))
+    eid=cur.lastrowid; con.commit(); con.close(); await state.clear(); log_admin("event_create",details=f"id={eid}; audience={aud}; reward={d['reward']}")
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎉 Открыть событие",callback_data=f"event_view:{eid}")]])
+    sent,failed=await notify_audience(aud,ids_json,f"🎉 <b>НОВОЕ СОБЫТИЕ COS-DROP</b>\n\n<b>{escape(d['title'])}</b>\n{escape(d.get('description',''))}\n\nНаграда за участие: <b>{d['reward']} SD</b>",kb)
+    await message.answer(f"✅ Событие создано и отправлено.\nДоставлено: {sent}\nНе доставлено: {failed}",reply_markup=season_admin_kb())
+
+@dp.callback_query(F.data == "season_events")
+async def season_events_user(callback:CallbackQuery):
+    uid=callback.from_user.id; con=db(); rows=con.execute("SELECT * FROM season_events WHERE enabled=1 ORDER BY id DESC LIMIT 20").fetchall(); lines=[]; buttons=[]
+    for r in rows:
+        if not is_target(r['audience'],r['audience_ids'],uid):continue
+        claim=con.execute("SELECT 1 FROM season_event_claims WHERE event_id=? AND user_id=?",(r['id'],uid)).fetchone()
+        lines.append(f"{'✅' if claim else '🎉'} <b>{escape(r['title'])}</b>\n{escape(r['description'] or '')}\nНаграда: {r['reward_sd']} SD")
+        if not claim:buttons.append([InlineKeyboardButton(text=f"🎁 Участвовать: {r['title'][:30]}",callback_data=f"event_claim:{r['id']}")])
+    con.close(); buttons.append([InlineKeyboardButton(text="◀️ Меню",callback_data="home")])
+    await callback.message.edit_text("🎉 <b>СОБЫТИЯ COS-DROP</b>\n\n"+("\n\n".join(lines) or "Активных событий пока нет."),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await callback.answer()
+
+@dp.callback_query(F.data.startswith("event_view:"))
+async def event_view(callback:CallbackQuery):
+    eid=int(callback.data.split(":")[1]); con=db(); r=con.execute("SELECT * FROM season_events WHERE id=? AND enabled=1",(eid,)).fetchone(); con.close()
+    if not r or not is_target(r['audience'],r['audience_ids'],callback.from_user.id):return await callback.answer("Событие недоступно.",show_alert=True)
+    await callback.message.answer(f"🎉 <b>{escape(r['title'])}</b>\n\n{escape(r['description'] or '')}\nНаграда: {r['reward_sd']} SD",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 Участвовать",callback_data=f"event_claim:{eid}")]])); await callback.answer()
+
+@dp.callback_query(F.data.startswith("event_claim:"))
+async def event_claim(callback:CallbackQuery):
+    ensure(callback.from_user)
+    uid=callback.from_user.id; eid=int(callback.data.split(":")[1]); con=db(); r=con.execute("SELECT * FROM season_events WHERE id=? AND enabled=1",(eid,)).fetchone()
+    if not r or not is_target(r['audience'],r['audience_ids'],uid):con.close(); return await callback.answer("Событие недоступно.",show_alert=True)
+    try: con.execute("INSERT INTO season_event_claims(event_id,user_id,claimed_at) VALUES(?,?,?)",(eid,uid,now()))
+    except sqlite3.IntegrityError: con.close(); return await callback.answer("Ты уже участвовал.",show_alert=True)
+    con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(r['reward_sd'],uid)); con.commit(); con.close()
+    await callback.answer(f"Награда +{r['reward_sd']} SD",show_alert=True)
+
+@dp.callback_query(F.data == "season_admin_quests")
+async def season_admin_quests(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    con=db(); rows=con.execute("SELECT * FROM season_quests ORDER BY id DESC LIMIT 15").fetchall(); con.close()
+    types={"case_opens":"открытие кейсов","casino_bets":"ставки в казино","daily_claims":"daily-бонусы"}
+    txt="🎯 <b>СЕЗОННЫЕ КВЕСТЫ</b>\n\n"+("\n".join(f"#{r['id']} {'🟢' if r['enabled'] else '⚫'} <b>{escape(r['title'])}</b> · {types.get(r['goal_type'],r['goal_type'])} {r['goal']} · +{r['reward_sd']} SD" for r in rows) or "Квестов пока нет.")
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{'🔴 Выключить' if r['enabled'] else '🟢 Включить'} #{r['id']}",callback_data=f"quest_toggle:{r['id']}")] for r in rows]+[[InlineKeyboardButton(text="➕ Создать квест",callback_data="quest_create")],[InlineKeyboardButton(text="◀️ Назад",callback_data="a2_season")]])
+    await callback.message.edit_text(txt,reply_markup=kb); await callback.answer()
+
+@dp.callback_query(F.data.startswith("quest_toggle:"))
+async def quest_toggle(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    qid=int(callback.data.split(":")[1]); con=db(); con.execute("UPDATE season_quests SET enabled=CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=?",(qid,)); con.commit(); con.close()
+    await callback.answer("Статус квеста изменён.",show_alert=True); await season_admin_quests(callback)
+
+@dp.callback_query(F.data == "quest_create")
+async def quest_create(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.clear(); await state.set_state(QuestCreate.title); await callback.message.edit_text("🎯 <b>Создание квеста</b>\n\nНазвание квеста:",reply_markup=a2_cancel()); await callback.answer()
+
+@dp.message(StateFilter(QuestCreate.title))
+async def quest_title(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    v=(message.text or "").strip()[:80]
+    if not v:return await message.answer("Название не может быть пустым.")
+    await state.update_data(title=v); await state.set_state(QuestCreate.description); await message.answer("Условие квеста (или - чтобы пропустить).")
+
+@dp.message(StateFilter(QuestCreate.description))
+async def quest_description(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await state.update_data(description="" if (message.text or "").strip()=="-" else (message.text or "").strip()[:700]); await state.set_state(QuestCreate.goal_type)
+    await message.answer("Выбери, что засчитывается в прогресс:",reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📦 Открытия кейсов",callback_data="quest_type:case_opens")],
+        [InlineKeyboardButton(text="🎰 Ставки в казино",callback_data="quest_type:casino_bets")],
+        [InlineKeyboardButton(text="🎁 Получения daily",callback_data="quest_type:daily_claims")],
+        [InlineKeyboardButton(text="❌ Отмена",callback_data="a2_season")]]))
+
+@dp.callback_query(F.data.startswith("quest_type:"))
+async def quest_type(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.update_data(goal_type=callback.data.split(":")[1]); await state.set_state(QuestCreate.goal)
+    await callback.message.edit_text("Сколько действий нужно выполнить? (1–100000)",reply_markup=a2_cancel()); await callback.answer()
+
+@dp.message(StateFilter(QuestCreate.goal))
+async def quest_goal(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    try:v=int((message.text or "").strip())
+    except Exception:return await message.answer("Введи число от 1 до 100000.")
+    if not 1<=v<=100000:return await message.answer("Введи число от 1 до 100000.")
+    await state.update_data(goal=v); await state.set_state(QuestCreate.reward); await message.answer("Награда в SD (0–100000000):")
+
+@dp.message(StateFilter(QuestCreate.reward))
+async def quest_reward(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    try:v=int((message.text or "").strip())
+    except Exception:return await message.answer("Введи целое число SD.")
+    if not 0<=v<=100000000:return await message.answer("Награда должна быть 0–100000000 SD.")
+    await state.update_data(reward=v); await state.set_state(QuestCreate.audience); await message.answer("Кому доступен квест?",reply_markup=audience_kb("quest"))
+
+@dp.callback_query(F.data.startswith("quest_aud:"))
+async def quest_audience(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    aud=callback.data.split(":")[1]; await state.update_data(audience=aud)
+    if aud=="some": await state.set_state(QuestCreate.ids); await callback.message.edit_text("Отправь Telegram ID игроков через пробел или запятую.",reply_markup=a2_cancel()); await callback.answer(); return
+    await save_quest(callback.message,state,[]); await callback.answer()
+
+@dp.message(StateFilter(QuestCreate.ids))
+async def quest_ids(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    ids=parse_ids(message.text or "")
+    if not ids:return await message.answer("Не нашёл ID. Отправь Telegram ID через пробел или запятую.")
+    await save_quest(message,state,ids)
+
+async def save_quest(message,state,ids):
+    d=await state.get_data(); con=db(); season=con.execute("SELECT id FROM seasons WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone(); sid=season['id'] if season else None
+    cur=con.execute("INSERT INTO season_quests(season_id,title,description,goal_type,goal,reward_sd,audience,audience_ids,enabled,created_at) VALUES(?,?,?,?,?,?,?,?,1,?)",(sid,d['title'],d.get('description',''),d['goal_type'],d['goal'],d['reward'],d.get('audience','all'),json.dumps(ids),now()))
+    qid=cur.lastrowid; con.commit(); con.close(); await state.clear(); log_admin("quest_create",details=f"id={qid}; audience={d.get('audience','all')}; type={d['goal_type']}; goal={d['goal']}")
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎯 Мои сезонные квесты",callback_data="season_quests")]])
+    sent,failed=await notify_audience(d.get('audience','all'),json.dumps(ids),f"🎯 <b>НОВЫЙ КВЕСТ COS-DROP</b>\n\n<b>{escape(d['title'])}</b>\n{escape(d.get('description',''))}\n\nЦель: {d['goal']} · Награда: {d['reward']} SD",kb)
+    await message.answer(f"✅ Квест создан и объявление отправлено.\nДоставлено: {sent}\nНе доставлено: {failed}",reply_markup=season_admin_kb())
+
+@dp.callback_query(F.data == "season_quests")
+async def season_quests_user(callback:CallbackQuery):
+    uid=callback.from_user.id; con=db(); rows=con.execute("SELECT * FROM season_quests WHERE enabled=1 ORDER BY id DESC LIMIT 30").fetchall(); lines=[]; buttons=[]
+    for q in rows:
+        if not is_target(q['audience'],q['audience_ids'],uid):continue
+        con.execute("INSERT OR IGNORE INTO season_quest_progress(user_id,quest_id,progress,claimed,updated_at) VALUES(?,?,0,0,?)",(uid,q['id'],now()))
+        pr=con.execute("SELECT * FROM season_quest_progress WHERE user_id=? AND quest_id=?",(uid,q['id'])).fetchone(); done=int(pr['progress'])>=int(q['goal'])
+        lines.append(f"{'🏆' if pr['claimed'] else '✅' if done else '🎯'} <b>{escape(q['title'])}</b>\n{escape(q['description'] or '')}\nПрогресс: {pr['progress']}/{q['goal']} · Награда: {q['reward_sd']} SD")
+        if done and not pr['claimed']:buttons.append([InlineKeyboardButton(text=f"🎁 Забрать #{q['id']} (+{q['reward_sd']} SD)",callback_data=f"quest_claim:{q['id']}")])
+    con.commit(); con.close(); buttons.append([InlineKeyboardButton(text="◀️ Меню",callback_data="home")])
+    await callback.message.edit_text("🎯 <b>СЕЗОННЫЕ КВЕСТЫ</b>\n\n"+("\n\n".join(lines) or "Нет активных квестов."),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await callback.answer()
+
+@dp.callback_query(F.data.startswith("quest_claim:"))
+async def quest_claim(callback:CallbackQuery):
+    uid=callback.from_user.id; qid=int(callback.data.split(":")[1]); con=db(); q=con.execute("SELECT * FROM season_quests WHERE id=? AND enabled=1",(qid,)).fetchone()
+    if not q or not is_target(q['audience'],q['audience_ids'],uid):con.close(); return await callback.answer("Квест недоступен.",show_alert=True)
+    pr=con.execute("SELECT * FROM season_quest_progress WHERE user_id=? AND quest_id=?",(uid,qid)).fetchone()
+    if not pr or pr['claimed'] or int(pr['progress'])<int(q['goal']):con.close(); return await callback.answer("Сначала выполни условие квеста.",show_alert=True)
+    con.execute("UPDATE season_quest_progress SET claimed=1,updated_at=? WHERE user_id=? AND quest_id=? AND claimed=0",(now(),uid,qid))
+    if con.total_changes<1:con.close();return await callback.answer("Награда уже получена.",show_alert=True)
+    con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(q['reward_sd'],uid)); con.commit(); con.close()
+    await callback.answer(f"🎁 Получено +{q['reward_sd']} SD",show_alert=True)
+    await callback.message.edit_text(f"🏆 Квест «{escape(q['title'])}» завершён!\n\nНаграда: +{q['reward_sd']} SD",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎯 К другим квестам",callback_data="season_quests")],[InlineKeyboardButton(text="🏠 Меню",callback_data="home")]]))
+
+@dp.callback_query(F.data == "season_admin_tournaments")
+async def season_admin_tournaments(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    con=db(); rows=con.execute("SELECT t.*, (SELECT COUNT(*) FROM tournament_participants p WHERE p.tournament_id=t.id) participants FROM tournaments t ORDER BY id DESC LIMIT 15").fetchall(); con.close()
+    txt="🏆 <b>ТУРНИРЫ</b>\n\n"+("\n".join(f"#{r['id']} · {'🟢 открыт' if r['status']=='open' else '🏁 завершён' if r['status']=='finished' else '❌ отменён'}\n<b>{escape(r['title'])}</b> · участников {r['participants']}\nВход: {r['entry_fee']} SD · Призы: {r['prize1']}/{r['prize2']}/{r['prize3']} SD" for r in rows) or "Турниров пока нет.")
+    buttons=[]
+    for r in rows:
+        if r['status']=='open':
+            buttons.append([InlineKeyboardButton(text=f"👥 Участники #{r['id']}",callback_data=f"tour_players:{r['id']}")])
+            buttons.append([InlineKeyboardButton(text=f"🏁 Итоги #{r['id']}",callback_data=f"tour_finish:{r['id']}"),InlineKeyboardButton(text=f"❌ Отменить #{r['id']}",callback_data=f"tour_cancel:{r['id']}")])
+    buttons += [[InlineKeyboardButton(text="➕ Создать турнир",callback_data="tournament_create")],[InlineKeyboardButton(text="◀️ Назад",callback_data="a2_season")]]
+    await callback.message.edit_text(txt,reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await callback.answer()
+
+@dp.callback_query(F.data == "tournament_create")
+async def tournament_create(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    await state.clear(); await state.set_state(TournamentCreate.title); await callback.message.edit_text("🏆 <b>Создание турнира</b>\n\nНазвание турнира:",reply_markup=a2_cancel()); await callback.answer()
+
+@dp.message(StateFilter(TournamentCreate.title))
+async def tour_title(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    v=(message.text or "").strip()[:80]
+    if not v:return await message.answer("Название не может быть пустым.")
+    await state.update_data(title=v); await state.set_state(TournamentCreate.entry_fee); await message.answer("💰 Взнос за вход в SD (0 — бесплатно):")
+
+async def _tour_num(message,state,key,next_state,prompt,max_value=100000000):
+    try:v=int((message.text or "").strip())
+    except Exception:return await message.answer(f"Введи целое число от 0 до {max_value}.")
+    if not 0<=v<=max_value:return await message.answer(f"Введи целое число от 0 до {max_value}.")
+    await state.update_data(**{key:v}); await state.set_state(next_state); await message.answer(prompt)
+
+@dp.message(StateFilter(TournamentCreate.entry_fee))
+async def tour_fee(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await _tour_num(message,state,"entry_fee",TournamentCreate.prize1,"🥇 Приз за 1 место в SD:")
+@dp.message(StateFilter(TournamentCreate.prize1))
+async def tour_prize1(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await _tour_num(message,state,"prize1",TournamentCreate.prize2,"🥈 Приз за 2 место в SD:")
+@dp.message(StateFilter(TournamentCreate.prize2))
+async def tour_prize2(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await _tour_num(message,state,"prize2",TournamentCreate.prize3,"🥉 Приз за 3 место в SD:")
+@dp.message(StateFilter(TournamentCreate.prize3))
+async def tour_prize3(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    await _tour_num(message,state,"prize3",TournamentCreate.audience,"Кому объявить турнир?",max_value=100000000)
+    await message.answer("Выбери аудиторию:",reply_markup=audience_kb("tour"))
+
+@dp.callback_query(F.data.startswith("tour_aud:"))
+async def tour_audience(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    aud=callback.data.split(":")[1]; await state.update_data(audience=aud)
+    if aud=="some":await state.set_state(TournamentCreate.ids);await callback.message.edit_text("Отправь Telegram ID игроков через пробел или запятую.",reply_markup=a2_cancel());await callback.answer();return
+    await save_tournament(callback.message,state,[]);await callback.answer()
+
+@dp.message(StateFilter(TournamentCreate.ids))
+async def tour_ids(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    ids=parse_ids(message.text or "")
+    if not ids:return await message.answer("Не нашёл ID. Отправь Telegram ID через пробел или запятую.")
+    await save_tournament(message,state,ids)
+
+async def save_tournament(message,state,ids):
+    d=await state.get_data(); con=db(); season=con.execute("SELECT id FROM seasons WHERE status='active' ORDER BY id DESC LIMIT 1").fetchone(); sid=season['id'] if season else None
+    cur=con.execute("INSERT INTO tournaments(title,entry_fee,prize1,prize2,prize3,audience,audience_ids,status,created_at) VALUES(?,?,?,?,?,?,?,'open',?)",(d['title'],d['entry_fee'],d['prize1'],d['prize2'],d['prize3'],d.get('audience','all'),json.dumps(ids),now()))
+    tid=cur.lastrowid; con.commit(); con.close(); await state.clear(); log_admin("tournament_create",details=f"id={tid}; entry={d['entry_fee']}; prizes={d['prize1']}/{d['prize2']}/{d['prize3']}")
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏆 Участвовать",callback_data=f"tour_join:{tid}")]])
+    sent,failed=await notify_audience(d.get('audience','all'),json.dumps(ids),f"🏆 <b>НОВЫЙ ТУРНИР COS-DROP</b>\n\n<b>{escape(d['title'])}</b>\nВход: <b>{d['entry_fee']} SD</b>\n🥇 1 место: {d['prize1']} SD\n🥈 2 место: {d['prize2']} SD\n🥉 3 место: {d['prize3']} SD\n\nНажми кнопку, чтобы зарегистрироваться.",kb)
+    await message.answer(f"✅ Турнир создан и приглашения отправлены.\nДоставлено: {sent}\nНе доставлено: {failed}",reply_markup=season_admin_kb())
+
+@dp.callback_query(F.data == "tournaments_user")
+async def tournaments_user(callback:CallbackQuery):
+    uid=callback.from_user.id; con=db(); rows=con.execute("SELECT * FROM tournaments WHERE status='open' ORDER BY id DESC LIMIT 20").fetchall(); lines=[]; buttons=[]
+    for r in rows:
+        if not is_target(r['audience'],r['audience_ids'],uid):continue
+        part=con.execute("SELECT 1 FROM tournament_participants WHERE tournament_id=? AND user_id=?",(r['id'],uid)).fetchone()
+        n=con.execute("SELECT COUNT(*) n FROM tournament_participants WHERE tournament_id=?",(r['id'],)).fetchone()['n']
+        lines.append(f"🏆 <b>{escape(r['title'])}</b>\nУчастников: {n}\nВход: {r['entry_fee']} SD\n🥇 {r['prize1']} · 🥈 {r['prize2']} · 🥉 {r['prize3']} SD\n{'✅ Ты зарегистрирован' if part else 'Открыта регистрация'}")
+        if not part:buttons.append([InlineKeyboardButton(text=f"Войти #{r['id']} · {r['entry_fee']} SD",callback_data=f"tour_join:{r['id']}")])
+    con.close(); buttons.append([InlineKeyboardButton(text="◀️ Меню",callback_data="home")])
+    await callback.message.edit_text("🏆 <b>ТУРНИРЫ COS-DROP</b>\n\n"+("\n\n".join(lines) or "Сейчас нет открытых турниров."),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)); await callback.answer()
+
+@dp.callback_query(F.data.startswith("tour_join:"))
+async def tour_join(callback:CallbackQuery):
+    ensure(callback.from_user)
+    uid=callback.from_user.id; tid=int(callback.data.split(":")[1]); con=db(); r=con.execute("SELECT * FROM tournaments WHERE id=? AND status='open'",(tid,)).fetchone()
+    if not r or not is_target(r['audience'],r['audience_ids'],uid):con.close();return await callback.answer("Регистрация закрыта или турнир недоступен.",show_alert=True)
+    if con.execute("SELECT 1 FROM tournament_participants WHERE tournament_id=? AND user_id=?",(tid,uid)).fetchone():con.close();return await callback.answer("Ты уже участвуешь.",show_alert=True)
+    user=con.execute("SELECT sd,blocked FROM users WHERE user_id=?",(uid,)).fetchone()
+    if not user or user['blocked']:con.close();return await callback.answer("Аккаунт недоступен.",show_alert=True)
+    fee=int(r['entry_fee'])
+    if int(user['sd'])<fee:con.close();return await callback.answer(f"Не хватает SD. Нужно {fee} SD.",show_alert=True)
+    con.execute("UPDATE users SET sd=sd-? WHERE user_id=?",(fee,uid)); con.execute("INSERT INTO tournament_participants(tournament_id,user_id,joined_at,place,reward_paid) VALUES(?,?,?,NULL,0)",(tid,uid,now())); con.commit(); con.close()
+    log_admin("tournament_join",target=uid,details=f"tournament={tid}; fee={fee}")
+    await callback.answer("🏆 Ты зарегистрирован!",show_alert=True)
+
+@dp.callback_query(F.data.startswith("tour_players:"))
+async def tour_players(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    tid=int(callback.data.split(":")[1]);con=db()
+    rows=con.execute("SELECT p.user_id,p.joined_at,u.username,u.first_name FROM tournament_participants p LEFT JOIN users u ON u.user_id=p.user_id WHERE p.tournament_id=? ORDER BY p.joined_at",(tid,)).fetchall()
+    con.close()
+    txt=f"👥 <b>УЧАСТНИКИ ТУРНИРА #{tid}</b>\n\n"+("\n".join(f"{i}. <code>{r['user_id']}</code> · @{escape(r['username'] or 'нет')} · {escape(r['first_name'] or '')}" for i,r in enumerate(rows,1)) or "Пока никто не зарегистрировался.")
+    await callback.message.edit_text(txt,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К турнирам",callback_data="season_admin_tournaments")]]));await callback.answer()
+
+@dp.callback_query(F.data.startswith("tour_finish:"))
+async def tour_finish(callback:CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id):return
+    tid=int(callback.data.split(":")[1]); con=db(); r=con.execute("SELECT * FROM tournaments WHERE id=? AND status='open'",(tid,)).fetchone(); con.close()
+    if not r:return await callback.answer("Турнир уже закрыт.",show_alert=True)
+    await state.clear();await state.set_state(TournamentFinish.places);await state.update_data(tournament_id=tid)
+    await callback.message.edit_text(f"🏁 <b>Итоги турнира #{tid}</b> — {escape(r['title'])}\n\nОтправь Telegram ID трёх мест через пробел:\n<code>ID_1 ID_2 ID_3</code>\nЕсли место пустое, укажи <code>0</code>. Игроки должны быть зарегистрированы в этом турнире.",reply_markup=a2_cancel());await callback.answer()
+
+@dp.message(StateFilter(TournamentFinish.places))
+async def tour_finish_places(message:Message,state:FSMContext):
+    if not is_admin(message.from_user.id):return
+    vals=parse_ids((message.text or "").replace(","," ").replace(";"," "))
+    # Keep positional zeroes, unlike parse_ids which filters them.
+    parts=re.split(r"[,;\s]+",(message.text or "").strip())
+    if len(parts)!=3 or any(not x.isdigit() for x in parts):return await message.answer("Нужно ровно три числовых ID, ноль означает пустое место. Пример: 123 456 0")
+    places=[int(x) for x in parts]
+    nonzero=[x for x in places if x]
+    if len(set(nonzero))!=len(nonzero):return await message.answer("Один игрок не может занимать несколько мест.")
+    d=await state.get_data();tid=int(d['tournament_id']);con=db();r=con.execute("SELECT * FROM tournaments WHERE id=? AND status='open'",(tid,)).fetchone()
+    if not r:con.close();await state.clear();return await message.answer("Турнир уже закрыт.",reply_markup=season_admin_kb())
+    prizes=[int(r['prize1']),int(r['prize2']),int(r['prize3'])]
+    for place,uid in enumerate(places,1):
+        if not uid:continue
+        part=con.execute("SELECT * FROM tournament_participants WHERE tournament_id=? AND user_id=?",(tid,uid)).fetchone()
+        if not part:con.close();return await message.answer(f"ID {uid} не зарегистрирован в турнире. Проверь список участников и попробуй снова.")
+    for place,uid in enumerate(places,1):
+        if not uid:continue
+        prize=prizes[place-1]
+        con.execute("UPDATE tournament_participants SET place=?,reward_paid=1 WHERE tournament_id=? AND user_id=?",(place,tid,uid))
+        con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(prize,uid))
+    con.execute("UPDATE tournaments SET status='finished',finished_at=? WHERE id=?",(now(),tid));con.commit();con.close();await state.clear()
+    for place,uid in enumerate(places,1):
+        if uid:
+            try:await bot.send_message(uid,f"🏆 <b>ИТОГИ ТУРНИРА COS-DROP</b>\n\nТурнир: <b>{escape(r['title'])}</b>\nМесто: <b>{place}</b>\nНаграда: <b>+{prizes[place-1]} SD</b>")
+            except Exception:pass
+    log_admin("tournament_finish",details=f"id={tid}; places={places}")
+    await message.answer("✅ Турнир завершён, награды выданы.",reply_markup=season_admin_kb())
+
+@dp.callback_query(F.data.startswith("tour_cancel:"))
+async def tour_cancel(callback:CallbackQuery):
+    if not is_admin(callback.from_user.id):return
+    tid=int(callback.data.split(":")[1]);con=db();r=con.execute("SELECT * FROM tournaments WHERE id=? AND status='open'",(tid,)).fetchone()
+    if not r:con.close();return await callback.answer("Турнир уже закрыт.",show_alert=True)
+    parts=con.execute("SELECT user_id FROM tournament_participants WHERE tournament_id=?",(tid,)).fetchall()
+    for part in parts:con.execute("UPDATE users SET sd=sd+? WHERE user_id=?",(r['entry_fee'],part['user_id']))
+    con.execute("UPDATE tournaments SET status='cancelled',finished_at=? WHERE id=?",(now(),tid));con.commit();con.close()
+    for part in parts:
+        try:await bot.send_message(part['user_id'],f"❌ Турнир «{escape(r['title'])}» отменён. Взнос {r['entry_fee']} SD возвращён.")
+        except Exception:pass
+    log_admin("tournament_cancel",details=f"id={tid}; refunded={len(parts)}")
+    await season_admin_tournaments(callback)
 
 # ========== FALLBACK ==========
 @dp.message(StateFilter(None))
@@ -2782,8 +3310,7 @@ async def fallback(message: Message):
 async def main():
     init_db()
     logging.info("COS-DROP started | DB=%s",DB_FILE)
-    from webapp_api import start_web_server
-    await asyncio.gather(dp.start_polling(bot), start_web_server())
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
