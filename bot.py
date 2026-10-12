@@ -472,7 +472,7 @@ def home_kb(user=None):
         ("🏅 Достижения","achievements"),("📋 Задания","tasks"),("⚔️ Дуэли","duels"),
         ("👥 Рефералы","ref"),("💎 CosDrop+","subscribe"),("📝 Заявки","apps"),
         ("🌟 Сезон","season_info"),("🎉 События","season_events"),("🎯 Сезонные квесты","season_quests"),
-        ("🏆 Турниры","tournaments_user"),("ℹ️ О боте","about")]:
+        ("🏆 Турниры","tournaments_user"),("🛒 Рынок","market_home"),("🎯 Контракты","contracts_home"),("🔄 Обмен","trade_home"),("ℹ️ О боте","about")]:
         b.button(text=t,callback_data=d)
     b.adjust(2,2,2,2,2,2,2,1,1); return b.as_markup()
 
@@ -493,10 +493,15 @@ def admin_kb():
 def casino_menu():
     b = InlineKeyboardBuilder()
     for t,d in [("🎰 Слоты","cas_slots"),("🎲 Кости","cas_dice"),("🪙 Монетка","cas_coin"),
-        ("🎡 Рулетка","cas_roulette"),("💣 Мины","cas_mines"),("📊 Статистика","cas_stats"),
+        ("🎡 Рулетка","cas_roulette"),("💣 Мины","cas_mines"),
+        ("🃏 Блэкджек","xgame_blackjack"),("🎯 Дартс","xgame_darts"),("🧱 Башня","xgame_tower"),("🪙 Орёл/решка+","xgame_doublecoin"),
+        ("🎁 Сюрприз","xgame_surprise"),("🌋 Вулкан","xgame_volcano"),("🧊 Лёд","xgame_ice"),("🔥 Огонь","xgame_fire"),
+        ("🌙 Лунный шанс","xgame_moon"),("👻 Призрак","xgame_ghost"),("🧙 Маг","xgame_wizard"),("🧟 Зомби","xgame_zombie"),
+        ("🕸️ Паутина","xgame_web"),("🎃 Тыква","xgame_pumpkin"),("🦇 Летучая мышь","xgame_bat"),("🧪 Зелье","xgame_potion"),
+        ("💀 Череп","xgame_skull"),("🕯️ Свеча","xgame_candle"),("🪦 Склеп","xgame_crypt"),("🕰️ Время","xgame_time"),("📊 Статистика","cas_stats"),
         ("🏆 Топ","cas_top"),("◀️ Назад","home")]:
         b.button(text=t,callback_data=d)
-    b.adjust(2,2,2,1,1); return b.as_markup()
+    b.adjust(2,2,2,2,2,2,2,2,2,2,2,2,2); return b.as_markup()
 
 def bet_kb(game):
     mn = get_limit("casino_min"); mx = get_limit("casino_max")
@@ -1854,7 +1859,7 @@ def a2_root_kb():
         ("🎰 Казино","a2_casino"),("📜 Логи","a2_logs"),("🛠 Сервис","a2_maint"),
         ("📢 Рассылка","a2_broadcast"),("⚙️ Лимиты","a3_root"),
         ("💰 Экономика","a3_econ"),("🎯 Массовые","a3_mass"),
-        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),
+        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),("🛒 Рынок/обмен","a2_economy_market"),("🎃 Хэллоуин","halloween_admin"),
         ("🔴 Выключить бота","a2_maintenance"),
         ("☢️ Сбросить ВСЁ у игроков","a2_wipe"),
         ("📁 Экспорт","a3_export"),("🛠 Диагностика","a3_diag"),
@@ -3291,6 +3296,263 @@ async def tour_cancel(callback:CallbackQuery):
     log_admin("tournament_cancel",details=f"id={tid}; refunded={len(parts)}")
     await season_admin_tournaments(callback)
 
+
+# ========== COS-DROP: MARKET / CONTRACTS / TRADING / HALLOWEEN / CUSTOM CASINO ==========
+# Tables are additive; the existing users, inventory and economy tables are never reset.
+def init_extra_features():
+    con=db()
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS market_lots(id INTEGER PRIMARY KEY AUTOINCREMENT,seller_id INTEGER,item_id INTEGER,price INTEGER,status TEXT DEFAULT 'active',created_at TEXT);
+    CREATE TABLE IF NOT EXISTS item_trades(id INTEGER PRIMARY KEY AUTOINCREMENT,from_user INTEGER,to_user INTEGER,item_id INTEGER,offer_sd INTEGER,status TEXT DEFAULT 'pending',created_at TEXT);
+    CREATE TABLE IF NOT EXISTS contracts(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT,description TEXT,item_count INTEGER,reward_sd INTEGER,enabled INTEGER DEFAULT 1);
+    CREATE TABLE IF NOT EXISTS contract_claims(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,contract_id INTEGER,created_at TEXT);
+    CREATE TABLE IF NOT EXISTS custom_casino(id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT UNIQUE,title TEXT,description TEXT,multiplier REAL DEFAULT 1.8,enabled INTEGER DEFAULT 1);
+    """)
+    games=[('blackjack','🃏 Блэкджек','Набери удачную комбинацию',1.9),('darts','🎯 Дартс','Попади в центр мишени',1.8),('tower','🧱 Башня','Поднимись на этаж выше',2.0),('doublecoin','🪙 Двойная монета','Угадай сторону дважды',3.5),('surprise','🎁 Сюрприз','Таинственный подарок',2.2),('volcano','🌋 Вулкан','Переживи извержение',2.0),('ice','🧊 Лёд','Не поскользнись',1.9),('fire','🔥 Огонь','Испытай огонь',2.0),('moon','🌙 Лунный шанс','Поймай лунный свет',2.1),('ghost','👻 Призрак','Не дай призраку украсть ставку',2.0),('wizard','🧙 Маг','Угадай заклинание',2.3),('zombie','🧟 Зомби','Ускользни от зомби',1.9),('web','🕸️ Паутина','Выбери безопасную нить',2.0),('pumpkin','🎃 Тыква','Найди золотую тыкву',2.5),('bat','🦇 Летучая мышь','Поймай ночной бонус',2.0),('potion','🧪 Зелье','Выбери верное зелье',2.2),('skull','💀 Череп','Испытай удачу черепа',2.0),('candle','🕯️ Свеча','Не дай свече погаснуть',1.8),('crypt','🪦 Склеп','Найди выход из склепа',2.4),('time','🕰️ Время','Останови часы вовремя',2.0)]
+    for code,title,desc,mul in games:
+        con.execute('INSERT OR IGNORE INTO custom_casino(code,title,description,multiplier,enabled) VALUES(?,?,?,?,1)',(code,title,desc,mul))
+    con.execute('INSERT OR IGNORE INTO contracts(title,description,item_count,reward_sd,enabled) VALUES(?,?,?,?,1)',('🎃 Хэллоуинская коллекция','Сдай 3 предмета и получи награду',3,250))
+    con.commit(); con.close()
+
+@dp.callback_query(F.data == 'market_home')
+async def market_home(c:CallbackQuery):
+    await c.message.edit_text('🛒 <b>НОЧНОЙ РЫНОК COS-DROP</b>\nВыставляй предметы за SD или покупай лоты других игроков.',reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='📋 Активные лоты',callback_data='market_list')],[InlineKeyboardButton(text='➕ Выставить предмет',callback_data='market_sell')],[InlineKeyboardButton(text='◀️ Назад',callback_data='home')]])); await c.answer()
+
+@dp.callback_query(F.data == 'market_list')
+async def market_list(c:CallbackQuery):
+    con=db(); rows=con.execute("SELECT l.id,l.price,i.name,l.seller_id FROM market_lots l JOIN items i ON i.id=l.item_id WHERE l.status='active' ORDER BY l.id DESC LIMIT 15").fetchall(); con.close()
+    b=InlineKeyboardBuilder(); lines=['🛒 <b>ЛОТЫ РЫНКА</b>']
+    for r in rows:
+        lines.append(f"#{r['id']} · {escape(r['name'])} — <b>{r['price']} SD</b>")
+        b.button(text=f"Купить #{r['id']} · {r['price']} SD",callback_data=f"market_buy:{r['id']}")
+    if not rows: lines.append('Пока нет активных лотов.')
+    b.button(text='◀️ Рынок',callback_data='market_home'); b.adjust(1)
+    await c.message.edit_text('\n'.join(lines),reply_markup=b.as_markup()); await c.answer()
+
+@dp.callback_query(F.data == 'market_sell')
+async def market_sell(c:CallbackQuery):
+    con=db(); rows=con.execute('SELECT i.id,i.name,COUNT(*) n FROM inventory v JOIN items i ON i.id=v.item_id WHERE v.user_id=? GROUP BY i.id,i.name ORDER BY i.name LIMIT 30',(c.from_user.id,)).fetchall(); con.close()
+    b=InlineKeyboardBuilder()
+    for r in rows: b.button(text=f"{r['name']} ×{r['n']}",callback_data=f"market_choose:{r['id']}")
+    b.button(text='◀️ Назад',callback_data='market_home'); b.adjust(1)
+    await c.message.edit_text('Выбери предмет, который выставить на рынок:',reply_markup=b.as_markup()); await c.answer()
+
+@dp.callback_query(F.data.startswith('market_choose:'))
+async def market_choose(c:CallbackQuery):
+    iid=int(c.data.split(':')[1]); con=db(); owned=con.execute('SELECT id FROM inventory WHERE user_id=? AND item_id=? LIMIT 1',(c.from_user.id,iid)).fetchone(); con.close()
+    if not owned: return await c.answer('Предмет не найден в коллекции.',show_alert=True)
+    await c.message.answer('Отправь цену лота целым числом SD (минимум 1).'); await c.answer()
+    # use a compact reply command to avoid touching existing FSM states
+    set_limit(f'market_pending_{c.from_user.id}',iid)
+
+@dp.message(StateFilter(None), F.text.regexp(r'^/lot\s+\d+$'))
+async def market_create_lot_cmd(m:Message):
+    iid=get_limit(f'market_pending_{m.from_user.id}')
+    if not iid: return await m.answer('Сначала выбери предмет в 🛒 Рынке, затем отправь /lot ЦЕНА')
+    price=int(m.text.split()[1])
+    if price<1: return await m.answer('Цена должна быть больше нуля.')
+    con=db(); inv=con.execute('SELECT id FROM inventory WHERE user_id=? AND item_id=? LIMIT 1',(m.from_user.id,int(iid))).fetchone()
+    if not inv: con.close(); return await m.answer('Предмет уже отсутствует в коллекции.')
+    con.execute('DELETE FROM inventory WHERE id=?',(inv['id'],)); con.execute("INSERT INTO market_lots(seller_id,item_id,price,status,created_at) VALUES(?,?,?,'active',?)",(m.from_user.id,int(iid),price,now())); con.commit(); con.close(); set_limit(f'market_pending_{m.from_user.id}',0)
+    await m.answer(f'🎃 Лот выставлен за {price} SD!')
+
+@dp.callback_query(F.data.startswith('market_buy:'))
+async def market_buy(c:CallbackQuery):
+    lid=int(c.data.split(':')[1]); con=db()
+    lot=con.execute("SELECT * FROM market_lots WHERE id=? AND status='active'",(lid,)).fetchone(); buyer=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()
+    if not lot or not buyer: con.close(); return await c.answer('Лот недоступен.',show_alert=True)
+    if lot['seller_id']==c.from_user.id: con.close(); return await c.answer('Нельзя купить свой лот.',show_alert=True)
+    if buyer['sd']<lot['price']: con.close(); return await c.answer('Недостаточно SD.',show_alert=True)
+    cur=con.execute("UPDATE market_lots SET status='sold' WHERE id=? AND status='active'",(lid,))
+    if cur.rowcount!=1: con.rollback(); con.close(); return await c.answer('Лот уже купили.',show_alert=True)
+    con.execute('UPDATE users SET sd=sd-? WHERE user_id=?',(lot['price'],c.from_user.id)); con.execute('UPDATE users SET sd=sd+? WHERE user_id=?',(lot['price'],lot['seller_id'])); con.execute('INSERT INTO inventory(user_id,item_id,obtained_at) VALUES(?,?,?)',(c.from_user.id,lot['item_id'],now())); con.commit(); con.close()
+    await c.answer('Покупка успешна!'); await c.message.edit_text(f'🎃 Лот #{lid} куплен за {lot["price"]} SD.')
+
+@dp.callback_query(F.data == 'contracts_home')
+async def contracts_home(c:CallbackQuery):
+    con=db(); rows=con.execute('SELECT * FROM contracts WHERE enabled=1 ORDER BY id').fetchall(); con.close(); b=InlineKeyboardBuilder(); lines=['🎯 <b>КОНТРАКТЫ</b>','Сдай предметы и получи награду:']
+    for r in rows: lines.append(f"\n<b>#{r['id']} {escape(r['title'])}</b> — {r['item_count']} предмета → {r['reward_sd']} SD"); b.button(text=f"Выполнить #{r['id']}",callback_data=f"contract_do:{r['id']}")
+    if not rows: lines.append('\nСейчас нет активных контрактов.')
+    b.button(text='◀️ Назад',callback_data='home'); b.adjust(1)
+    await c.message.edit_text('\n'.join(lines),reply_markup=b.as_markup()); await c.answer()
+
+@dp.callback_query(F.data.startswith('contract_do:'))
+async def contract_do(c:CallbackQuery):
+    cid=int(c.data.split(':')[1]); con=db(); r=con.execute('SELECT * FROM contracts WHERE id=? AND enabled=1',(cid,)).fetchone()
+    if not r: con.close(); return await c.answer('Контракт недоступен.',show_alert=True)
+    count=con.execute('SELECT COUNT(*) n FROM inventory WHERE user_id=?',(c.from_user.id,)).fetchone()['n']
+    if count<r['item_count']: con.close(); return await c.answer(f"Нужно предметов: {r['item_count']}",show_alert=True)
+    ids=con.execute('SELECT id FROM inventory WHERE user_id=? ORDER BY id LIMIT ?',(c.from_user.id,r['item_count'])).fetchall()
+    con.executemany('DELETE FROM inventory WHERE id=?',[(x['id'],) for x in ids]); con.execute('UPDATE users SET sd=sd+? WHERE user_id=?',(r['reward_sd'],c.from_user.id)); con.execute('INSERT INTO contract_claims(user_id,contract_id,created_at) VALUES(?,?,?)',(c.from_user.id,cid,now())); con.commit(); con.close()
+    await c.answer('Контракт выполнен!'); await c.message.edit_text(f"🎯 Контракт выполнен! Получено {r['reward_sd']} SD.")
+
+@dp.callback_query(F.data == 'trade_home')
+async def trade_home(c:CallbackQuery):
+    await c.message.edit_text('🔄 <b>ОБМЕН</b>\nЧтобы начать безопасный обмен, отправь команду:\n<code>/trade USER_ID ITEM_ID SD</code>\nИгрок получит запрос и сможет принять или отклонить его.',reply_markup=back('home')); await c.answer()
+
+@dp.message(StateFilter(None), F.text.regexp(r'^/trade\s+\d+\s+\d+\s+\d+$'))
+async def trade_create(m:Message):
+    _,to,iid,sd=m.text.split(); to=int(to); iid=int(iid); sd=int(sd)
+    if to==m.from_user.id or sd<0: return await m.answer('Проверь ID и сумму SD.')
+    con=db(); u=con.execute('SELECT sd FROM users WHERE user_id=?',(m.from_user.id,)).fetchone(); target=con.execute('SELECT user_id FROM users WHERE user_id=?',(to,)).fetchone(); inv=con.execute('SELECT id FROM inventory WHERE user_id=? AND item_id=? LIMIT 1',(m.from_user.id,iid)).fetchone()
+    if not u or not target or not inv or u['sd']<sd: con.close(); return await m.answer('Нет пользователя, предмета или SD для обмена.')
+    con.execute('INSERT INTO item_trades(from_user,to_user,item_id,offer_sd,status,created_at) VALUES(?,?,?,? ,\'pending\',?)',(m.from_user.id,to,iid,sd,now())); tid=con.execute('SELECT last_insert_rowid()').fetchone()[0]; con.commit(); con.close()
+    try: await bot.send_message(to,f'🔄 Запрос обмена #{tid} от <code>{m.from_user.id}</code>: предмет ID {iid} и {sd} SD. Принять: <code>/tradeaccept {tid}</code>')
+    except Exception: pass
+    await m.answer(f'Запрос обмена #{tid} отправлен. Предмет и SD пока не списаны.')
+
+@dp.message(StateFilter(None), F.text.regexp(r'^/tradeaccept\s+\d+$'))
+async def trade_accept(m:Message):
+    tid=int(m.text.split()[1]); con=db(); tr=con.execute("SELECT * FROM item_trades WHERE id=? AND to_user=? AND status='pending'",(tid,m.from_user.id)).fetchone()
+    if not tr: con.close(); return await m.answer('Запрос не найден или уже закрыт.')
+    seller=con.execute('SELECT sd FROM users WHERE user_id=?',(tr['from_user'],)).fetchone(); buyer=con.execute('SELECT sd FROM users WHERE user_id=?',(tr['to_user'],)).fetchone(); inv=con.execute('SELECT id FROM inventory WHERE user_id=? AND item_id=? LIMIT 1',(tr['from_user'],tr['item_id'])).fetchone()
+    if not seller or not buyer or not inv or seller['sd']<tr['offer_sd']: con.close(); return await m.answer('Обмен уже невозможен: проверьте предмет и балансы.')
+    con.execute('DELETE FROM inventory WHERE id=?',(inv['id'],)); con.execute('INSERT INTO inventory(user_id,item_id,obtained_at) VALUES(?,?,?)',(tr['to_user'],tr['item_id'],now())); con.execute('UPDATE users SET sd=sd-? WHERE user_id=?',(tr['offer_sd'],tr['to_user'])); con.execute('UPDATE users SET sd=sd+? WHERE user_id=?',(tr['offer_sd'],tr['from_user'])); con.execute("UPDATE item_trades SET status='accepted' WHERE id=?",(tid,)); con.commit(); con.close(); await m.answer('🔄 Обмен подтверждён!')
+
+@dp.callback_query(F.data == 'a2_economy_market')
+async def a2_economy_market(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    con=db(); lots=con.execute("SELECT COUNT(*) n FROM market_lots WHERE status='active'").fetchone()['n']; contracts=con.execute('SELECT COUNT(*) n FROM contracts').fetchone()['n']; con.close()
+    await c.message.edit_text(f'🛒 <b>РЫНОК / КОНТРАКТЫ</b>\nАктивных лотов: {lots}\nКонтрактов: {contracts}\n\nУправление контрактами командами:\n<code>/contractadd НАЗВАНИЕ|ОПИСАНИЕ|КОЛИЧЕСТВО|НАГРАДА</code>\n<code>/contractdel ID</code>\n<code>/contracttoggle ID</code>',reply_markup=back('a2_root')); await c.answer()
+
+@dp.callback_query(F.data == 'a2_casino')
+async def a2_casino_manage(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    con=db(); rows=con.execute('SELECT * FROM custom_casino ORDER BY id').fetchall(); con.close()
+    lines=['🎰 <b>РЕДАКТОР КАЗИНО</b>']
+    for r in rows: lines.append(f"{r['id']}. {escape(r['title'])} — {'вкл' if r['enabled'] else 'выкл'} · ×{r['multiplier']}")
+    lines += ['', 'Команды:', '<code>/casinoadd КОД|НАЗВАНИЕ|ОПИСАНИЕ|МНОЖИТЕЛЬ</code>', '<code>/casinodel ID</code>', '<code>/casinotoggle ID</code>', '<code>/casinoedit ID|НАЗВАНИЕ|ОПИСАНИЕ|МНОЖИТЕЛЬ</code>']
+    await c.message.edit_text('\n'.join(lines),reply_markup=back('a2_root')); await c.answer()
+
+@dp.message(Command('casinoadd'))
+async def casino_add(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        code,title,desc,mul=m.text.split(maxsplit=1)[1].split('|'); mul=float(mul)
+        if not re.fullmatch(r'[a-z0-9_]{2,24}',code.strip()) or mul<1 or mul>100: raise ValueError()
+        con=db(); con.execute('INSERT INTO custom_casino(code,title,description,multiplier,enabled) VALUES(?,?,?,?,1)',(code.strip(),title.strip(),desc.strip(),mul)); con.commit(); con.close(); await m.answer('🎰 Режим добавлен. Для уникальной механики используй один из встроенных режимов; созданный режим использует базовую проверку удачи.')
+    except Exception: await m.answer('Формат: /casinoadd КОД|НАЗВАНИЕ|ОПИСАНИЕ|МНОЖИТЕЛЬ')
+
+@dp.message(Command('casinodel'))
+async def casino_del(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        con=db(); con.execute('DELETE FROM custom_casino WHERE id=?',(int(m.text.split()[1]),)); con.commit(); con.close(); await m.answer('Режим удалён.')
+    except Exception: await m.answer('Формат: /casinodel ID')
+
+@dp.message(Command('casinotoggle'))
+async def casino_toggle(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        con=db(); con.execute('UPDATE custom_casino SET enabled=CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(int(m.text.split()[1]),)); con.commit(); con.close(); await m.answer('Статус режима изменён.')
+    except Exception: await m.answer('Формат: /casinotoggle ID')
+
+@dp.message(Command('casinoedit'))
+async def casino_edit(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        raw=m.text.split(maxsplit=1)[1]; sid,title,desc,mul=raw.split('|'); mul=float(mul); sid=int(sid)
+        if mul<1 or mul>100: raise ValueError()
+        con=db(); con.execute('UPDATE custom_casino SET title=?,description=?,multiplier=? WHERE id=?',(title.strip(),desc.strip(),mul,sid)); con.commit(); con.close(); await m.answer('Режим изменён.')
+    except Exception: await m.answer('Формат: /casinoedit ID|НАЗВАНИЕ|ОПИСАНИЕ|МНОЖИТЕЛЬ')
+
+@dp.message(Command('itemadd'))
+async def item_add_cmd(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        code,name,rarity,price=m.text.split(maxsplit=1)[1].split('|'); price=int(price)
+        if rarity.strip().lower() not in RARITY_ORDER or price<0: raise ValueError()
+        con=db(); con.execute('INSERT INTO items(code,name,rarity,sell_price,enabled) VALUES(?,?,?,?,1)',(code.strip(),name.strip(),rarity.strip().lower(),price)); con.commit(); con.close(); await m.answer('Предмет добавлен.')
+    except Exception: await m.answer('Формат: /itemadd КОД|НАЗВАНИЕ|common/rare/epic/legendary/mythic|ЦЕНА_ПРОДАЖИ')
+
+@dp.message(Command('itemedit'))
+async def item_edit_cmd(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        iid,name,rarity,price=m.text.split(maxsplit=1)[1].split('|'); iid=int(iid); price=int(price)
+        if rarity.strip().lower() not in RARITY_ORDER or price<0: raise ValueError()
+        con=db(); con.execute('UPDATE items SET name=?,rarity=?,sell_price=? WHERE id=?',(name.strip(),rarity.strip().lower(),price,iid)); con.commit(); con.close(); await m.answer('Предмет изменён.')
+    except Exception: await m.answer('Формат: /itemedit ID|НАЗВАНИЕ|РЕДКОСТЬ|ЦЕНА_ПРОДАЖИ')
+
+@dp.message(Command('itemdel'))
+async def item_del_cmd(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        iid=int(m.text.split()[1]); con=db(); con.execute('UPDATE items SET enabled=0 WHERE id=?',(iid,)); con.execute('DELETE FROM case_items WHERE item_id=?',(iid,)); con.commit(); con.close(); await m.answer('Предмет отключён и убран из дропов. История инвентаря сохранена.')
+    except Exception: await m.answer('Формат: /itemdel ID')
+
+@dp.message(Command('caseadd'))
+async def case_add_cmd(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        code,name,desc,price=m.text.split(maxsplit=1)[1].split('|'); price=int(price)
+        if price<0: raise ValueError()
+        con=db(); con.execute('INSERT INTO cases(code,name,description,price,enabled) VALUES(?,?,?,?,1)',(code.strip(),name.strip(),desc.strip(),price)); con.commit(); con.close(); await m.answer('Кейс добавлен. Теперь привяжи предметы через существующий редактор дропов.')
+    except Exception: await m.answer('Формат: /caseadd КОД|НАЗВАНИЕ|ОПИСАНИЕ|ЦЕНА')
+
+@dp.message(Command('caseedit'))
+async def case_edit_cmd(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        cid,name,desc,price=m.text.split(maxsplit=1)[1].split('|'); cid=int(cid); price=int(price)
+        if price<0: raise ValueError()
+        con=db(); con.execute('UPDATE cases SET name=?,description=?,price=? WHERE id=?',(name.strip(),desc.strip(),price,cid)); con.commit(); con.close(); await m.answer('Кейс изменён.')
+    except Exception: await m.answer('Формат: /caseedit ID|НАЗВАНИЕ|ОПИСАНИЕ|ЦЕНА')
+
+@dp.message(Command('casedel'))
+async def case_del_cmd(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        cid=int(m.text.split()[1]); con=db(); con.execute('UPDATE cases SET enabled=0 WHERE id=?',(cid,)); con.commit(); con.close(); await m.answer('Кейс отключён. История открытий сохранена.')
+    except Exception: await m.answer('Формат: /casedel ID')
+
+@dp.message(Command('contractadd'))
+async def contract_add(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        title,desc,count,reward=m.text.split(maxsplit=1)[1].split('|'); count=int(count); reward=int(reward); assert count>0 and reward>=0
+        con=db(); con.execute('INSERT INTO contracts(title,description,item_count,reward_sd,enabled) VALUES(?,?,?,?,1)',(title.strip(),desc.strip(),count,reward)); con.commit(); con.close(); await m.answer('🎯 Контракт создан.')
+    except Exception: await m.answer('Формат: /contractadd НАЗВАНИЕ|ОПИСАНИЕ|КОЛИЧЕСТВО|НАГРАДА')
+
+@dp.message(Command('contractdel'))
+async def contract_del(m:Message):
+    if not is_admin(m.from_user.id): return
+    try: cid=int(m.text.split()[1]); con=db(); con.execute('DELETE FROM contracts WHERE id=?',(cid,)); con.commit(); con.close(); await m.answer('Контракт удалён.')
+    except Exception: await m.answer('Формат: /contractdel ID')
+
+@dp.message(Command('contracttoggle'))
+async def contract_toggle(m:Message):
+    if not is_admin(m.from_user.id): return
+    try:
+        cid=int(m.text.split()[1]); con=db(); con.execute('UPDATE contracts SET enabled=CASE enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(cid,)); con.commit(); con.close(); await m.answer('Статус контракта изменён.')
+    except Exception: await m.answer('Формат: /contracttoggle ID')
+
+@dp.callback_query(F.data == 'halloween_admin')
+async def halloween_admin(c:CallbackQuery):
+    if not is_admin(c.from_user.id): return
+    set_limit('halloween_mode',1 if not get_limit('halloween_mode') else 0)
+    on=bool(get_limit('halloween_mode'))
+    await c.message.edit_text(('🎃 <b>ХЭЛЛОУИН ВКЛЮЧЁН</b>\nБу! Тыквы, призраки и ночные приключения активны.' if on else '☀️ <b>Обычная тема включена</b>'),reply_markup=back('a2_root')); await c.answer()
+
+@dp.callback_query(F.data.startswith('xgame_'))
+async def xgame_play(c:CallbackQuery):
+    if not get_limit('casino_enabled'): return await c.answer('Казино выключено.',show_alert=True)
+    code=c.data.replace('xgame_',''); con=db(); game=con.execute('SELECT * FROM custom_casino WHERE code=? AND enabled=1',(code,)).fetchone(); con.close()
+    if not game: return await c.answer('Режим выключен.',show_alert=True)
+    b=InlineKeyboardBuilder()
+    for amount in [10,25,50,100,250,500]: b.button(text=f'{amount} SD',callback_data=f'xbet:{code}:{amount}')
+    b.button(text='◀️ Казино',callback_data='casino'); b.adjust(3,3,1)
+    await c.message.edit_text(f"{game['title']}\n{escape(game['description'])}\nМножитель: ×{game['multiplier']}\nВыбери ставку:",reply_markup=b.as_markup()); await c.answer()
+
+@dp.callback_query(F.data.startswith('xbet:'))
+async def xgame_bet(c:CallbackQuery):
+    _,code,raw=c.data.split(':'); bet=int(raw); con=db(); game=con.execute('SELECT * FROM custom_casino WHERE code=? AND enabled=1',(code,)).fetchone(); u=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()
+    if not game or not u or bet<get_limit('casino_min') or bet>get_limit('casino_max') or u['sd']<bet: con.close(); return await c.answer('Недостаточно SD или режим недоступен.',show_alert=True)
+    win=random.random()<0.48; payout=int(bet*game['multiplier']) if win else 0
+    con.execute('UPDATE users SET sd=sd-?+? WHERE user_id=?',(bet,payout,c.from_user.id)); con.execute('INSERT INTO casino_bets(user_id,game,bet,win,profit,created_at) VALUES(?,?,?,?,?,?)',(c.from_user.id,code,bet,payout,payout-bet,now())); con.commit(); balance=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()['sd']; con.close()
+    await c.message.edit_text(f"{'🎃 УДАЧА!' if win else '👻 Призрак забрал ставку!'}\nСтавка: {bet} SD\nВыплата: {payout} SD\nБаланс: {balance} SD",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔁 Ещё раз',callback_data=f'xgame_{code}')],[InlineKeyboardButton(text='🎰 Казино',callback_data='casino')]])); await c.answer()
+
+
 # ========== FALLBACK ==========
 @dp.message(StateFilter(None))
 async def fallback(message: Message):
@@ -3309,6 +3571,7 @@ async def fallback(message: Message):
 # ========== MAIN ==========
 async def main():
     init_db()
+    init_extra_features()
     logging.info("COS-DROP started | DB=%s",DB_FILE)
     await dp.start_polling(bot)
 
