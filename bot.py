@@ -2253,31 +2253,15 @@ async def a2u_export(callback: CallbackQuery):
 async def a2_cases(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     con = db(); rows = con.execute("SELECT id,name,price,enabled FROM cases ORDER BY id").fetchall(); con.close()
-    txt = "📦 <b>КЕЙСЫ</b>\n\n" + ("\n".join(
-        f"{'🟢' if r['enabled'] else '🔴'} <b>{escape(r['name'])}</b> · {r['price']} SD · ID <code>{r['id']}</code>" for r in rows
-    ) or "Пока нет кейсов.")
-    txt += ("\n\n<b>Добавить:</b>\n<code>/caseadd КОД|НАЗВАНИЕ|ОПИСАНИЕ|ЦЕНА</code>"
-            "\n<b>Изменить название/описание/цену:</b>\n<code>/caseedit ID|НАЗВАНИЕ|ОПИСАНИЕ|ЦЕНА</code>"
-            "\n<b>Удалить (мягкое отключение):</b> <code>/casedel ID</code>")
+    txt = "📦 <b>КЕЙСЫ</b>\n\n" + "\n".join(
+        f"{'🟢' if r['enabled'] else '🔴'} <b>{escape(r['name'])}</b> · {r['price']} SD" for r in rows
+    ) or "Пусто."
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить кейс · команда", callback_data="a2_case_help")],
-        [InlineKeyboardButton(text="✏️ Изменить название/цену", callback_data="a2_case_edit_help")],
-        [InlineKeyboardButton(text="🗑 Удалить / отключить", callback_data="a2_case_del_help")],
         [InlineKeyboardButton(text="🔄 Вкл/выкл кейс", callback_data="case_toggle_start")],
         [InlineKeyboardButton(text="💰 Изменить цену", callback_data="case_price_start")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="a2_root")],
     ])
     await callback.message.edit_text(txt,reply_markup=kb); await callback.answer()
-
-@dp.callback_query(F.data.in_({"a2_case_help", "a2_case_edit_help", "a2_case_del_help"}))
-async def a2_case_help(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id): return
-    texts = {
-        "a2_case_help": "➕ <b>ДОБАВИТЬ КЕЙС</b>\nОтправь отдельным сообщением:\n<code>/caseadd КОД|НАЗВАНИЕ|ОПИСАНИЕ|ЦЕНА</code>\n\nПример: <code>/caseadd halloween|🎃 Ночная тыква|Хэллоуинский кейс|300</code>",
-        "a2_case_edit_help": "✏️ <b>ИЗМЕНИТЬ КЕЙС</b>\nКоманда меняет название, описание и цену:\n<code>/caseedit ID|НОВОЕ НАЗВАНИЕ|НОВОЕ ОПИСАНИЕ|ЦЕНА</code>\nID указан рядом с кейсом в списке.",
-        "a2_case_del_help": "🗑 <b>УДАЛИТЬ КЕЙС</b>\nДля сохранения истории кейс отключается, а не стирается из базы:\n<code>/casedel ID</code>\n\nПовторно включить можно в меню «Вкл/выкл кейс».",
-    }
-    await callback.message.edit_text(texts[callback.data], reply_markup=back("a2_cases")); await callback.answer()
 
 @dp.callback_query(F.data == "a2_items")
 async def a2_items(callback: CallbackQuery):
@@ -3560,93 +3544,13 @@ async def xgame_play(c:CallbackQuery):
     b.button(text='◀️ Казино',callback_data='casino'); b.adjust(3,3,1)
     await c.message.edit_text(f"{game['title']}\n{escape(game['description'])}\nМножитель: ×{game['multiplier']}\nВыбери ставку:",reply_markup=b.as_markup()); await c.answer()
 
-_CASINO_ANIMATING = set()
-
 @dp.callback_query(F.data.startswith('xbet:'))
 async def xgame_bet(c:CallbackQuery):
-    if not get_limit('casino_enabled'):
-        return await c.answer('Казино выключено.',show_alert=True)
-    try:
-        _,code,raw=c.data.split(':'); bet=int(raw)
-    except (ValueError, TypeError):
-        return await c.answer('Некорректная ставка.',show_alert=True)
-    if bet < get_limit('casino_min') or bet > get_limit('casino_max'):
-        return await c.answer(f"Ставка должна быть от {get_limit('casino_min')} до {get_limit('casino_max')} SD.",show_alert=True)
-    con=db(); game=con.execute('SELECT * FROM custom_casino WHERE code=? AND enabled=1',(code,)).fetchone(); u=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone(); con.close()
-    if not game or not u:
-        return await c.answer('Режим недоступен.',show_alert=True)
-    if u['sd'] < bet:
-        return await c.answer('Недостаточно SD.',show_alert=True)
-    if _check_loss_limit(c.from_user.id, bet):
-        return await c.answer('Достигнут дневной лимит проигрыша.',show_alert=True)
-
-    # Telegram message animation: the game result is decided only after the suspense frames.
-    title = escape(game['title'] or code)
-    themes = {
-        'blackjack': ['🃏 ░░░░░', '🂠 🂠 🂠', '🃏 🂠 🃏'],
-        'darts': ['🎯       ·', '🎯    •', '🎯  ⦿'],
-        'tower': ['🧱 / 🧱 🧱', '🧱 🟨 🧱', '🧱 🟩 🧱'],
-        'doublecoin': ['🪙 ↻', '🪙 ⤴️', '🪙 ✨'],
-        'surprise': ['🎁 ❔', '🎁 ✨❔', '🎁 💥✨'],
-        'volcano': ['🌋 · ·', '🌋 🔥 ·', '🌋 🔥 🔥'],
-        'ice': ['🧊 ❄️ ·', '🧊 ❄️ ❄️', '🧊 ✨❄️'],
-        'fire': ['🔥 · ·', '🔥 🔥 ·', '🔥 🔥 🔥'],
-        'moon': ['🌑 ·', '🌒 ✨', '🌕 ✨✨'],
-        'ghost': ['👻 · ·', '· 👻 ·', '👻 ✨ 👻'],
-        'wizard': ['🧙 ✨', '🧙 🪄✨', '🪄 🔮 ✨'],
-        'zombie': ['🧟 · ·', '🧟 🧟 ·', '🧟 ⚡ 🧟'],
-        'web': ['🕸️ · ·', '🕸️ 🕷️ ·', '🕸️ 🕷️ ✨'],
-        'pumpkin': ['🎃 · ·', '🎃 ✨ ·', '🎃 ✨✨'],
-        'bat': ['🦇 · ·', '· 🦇 ·', '🦇 🌙 🦇'],
-        'potion': ['🧪 🟣', '🧪 🟢', '🧪 ✨'],
-        'skull': ['💀 · ·', '💀 ✨ ·', '💀 💫 💀'],
-        'candle': ['🕯️ ·', '🕯️ ✨', '🕯️ 🔥✨'],
-        'crypt': ['🪦 · ·', '🪦 🌫️ ·', '🪦 🌫️ 👻'],
-        'time': ['🕰️ 00:03', '🕰️ 00:02', '🕰️ 00:01'],
-    }
-    frames = themes.get(code, ['🎰 ░░░', '🎰 ▒▒▒', '🎰 ▓▓▓'])
-    animation_key = (c.message.chat.id, c.message.message_id)
-    if animation_key in _CASINO_ANIMATING:
-        return await c.answer('Раунд уже идёт…', show_alert=False)
-    _CASINO_ANIMATING.add(animation_key)
-    try:
-        await c.message.edit_text(f"🎰 <b>{title}</b>\n\nСтавка: <b>{bet} SD</b>\n\n{frames[0]}\n⏳ Игра запускается…")
-        await c.answer('🎮 Игра началась!')
-        for i, frame in enumerate(frames[1:], start=2):
-            await asyncio.sleep(0.55)
-            await c.message.edit_text(f"🎰 <b>{title}</b>\n\nСтавка: <b>{bet} SD</b>\n\n{frame}\n⏳ Раунд {i}/{len(frames)}…")
-        await asyncio.sleep(0.35)
-    except Exception:
-        pass
-
-    # Recheck balance and mode after the animation, before changing the persistent wallet.
-    con=db(); game=con.execute('SELECT * FROM custom_casino WHERE code=? AND enabled=1',(code,)).fetchone(); u=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()
-    if not game or not u or u['sd'] < bet:
-        con.close()
-        try: await c.message.edit_text('❌ Ставка отменена: режим отключён или недостаточно SD.', reply_markup=back('casino'))
-        except Exception: pass
-        _CASINO_ANIMATING.discard(animation_key)
-        return
-    win=random.random()<0.48
-    payout=min(int(bet*game['multiplier']),get_limit('casino_max_win')) if win else 0
-    con.execute('UPDATE users SET sd=sd-?+? WHERE user_id=?',(bet,payout,c.from_user.id))
-    con.execute('INSERT INTO casino_bets(user_id,game,bet,win,profit,created_at) VALUES(?,?,?,?,?,?)',(c.from_user.id,code,bet,payout,payout-bet,now()))
-    con.commit(); balance=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()['sd']; con.close()
-    if payout > 0:
-        try: await check_achievements(c.from_user.id); await bump_task(c.from_user.id,'bet3',1)
-        except Exception: pass
-    else:
-        _apply_loss(c.from_user.id, bet)
-        try: await bump_task(c.from_user.id,'bet3',1)
-        except Exception: pass
-    result = (f"🎃 <b>ПОБЕДА!</b>\n{frames[-1]}\n\n" if payout > 0 else f"👻 <b>НЕ ПОВЕЗЛО!</b>\n{frames[-1]}\n\n")
-    result += f"🎮 {title}\nСтавка: <b>{bet} SD</b>\nВыплата: <b>{payout} SD</b>\nБаланс: <b>{balance} SD</b>"
-    try:
-        await c.message.edit_text(result,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔁 Ещё раз',callback_data=f'xgame_{code}')],[InlineKeyboardButton(text='🎰 Казино',callback_data='casino')]]))
-    except Exception:
-        pass
-    finally:
-        _CASINO_ANIMATING.discard(animation_key)
+    _,code,raw=c.data.split(':'); bet=int(raw); con=db(); game=con.execute('SELECT * FROM custom_casino WHERE code=? AND enabled=1',(code,)).fetchone(); u=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()
+    if not game or not u or bet<get_limit('casino_min') or bet>get_limit('casino_max') or u['sd']<bet: con.close(); return await c.answer('Недостаточно SD или режим недоступен.',show_alert=True)
+    win=random.random()<0.48; payout=int(bet*game['multiplier']) if win else 0
+    con.execute('UPDATE users SET sd=sd-?+? WHERE user_id=?',(bet,payout,c.from_user.id)); con.execute('INSERT INTO casino_bets(user_id,game,bet,win,profit,created_at) VALUES(?,?,?,?,?,?)',(c.from_user.id,code,bet,payout,payout-bet,now())); con.commit(); balance=con.execute('SELECT sd FROM users WHERE user_id=?',(c.from_user.id,)).fetchone()['sd']; con.close()
+    await c.message.edit_text(f"{'🎃 УДАЧА!' if win else '👻 Призрак забрал ставку!'}\nСтавка: {bet} SD\nВыплата: {payout} SD\nБаланс: {balance} SD",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔁 Ещё раз',callback_data=f'xgame_{code}')],[InlineKeyboardButton(text='🎰 Казино',callback_data='casino')]])); await c.answer()
 
 
 # ========== FALLBACK ==========
@@ -3668,8 +3572,19 @@ async def fallback(message: Message):
 async def main():
     init_db()
     init_extra_features()
-    logging.info("COS-DROP started | DB=%s",DB_FILE)
-    await dp.start_polling(bot)
+    # Run Telegram bot and COS-DROP WebApp API in the same Railway service
+    # so both use the same DB_FILE and existing persistent volume.
+    from webapp_api import start_web_server
+    web_task = asyncio.create_task(start_web_server())
+    logging.info("COS-DROP started | DB=%s", DB_FILE)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        web_task.cancel()
+        try:
+            await web_task
+        except asyncio.CancelledError:
+            pass
 
 if __name__ == "__main__":
     asyncio.run(main())
