@@ -123,6 +123,7 @@ class A2Msg(StatesGroup): uid=State(); text=State()
 class A2Search(StatesGroup): q=State()
 class A2Reset(StatesGroup): uid=State()
 class A2Premium(StatesGroup): uid=State(); hours=State()
+class A2Luck(StatesGroup): uid=State(); level=State()
 class A2Broadcast(StatesGroup): text=State()
 class A2Maintenance(StatesGroup): reason=State(); duration=State()
 class A3Limit(StatesGroup): key=State()
@@ -165,6 +166,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS admin_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER,
         action TEXT, target_user_id INTEGER, details TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS user_luck(user_id INTEGER PRIMARY KEY, level INTEGER NOT NULL DEFAULT 1, updated_by INTEGER, updated_at TEXT);
     CREATE TABLE IF NOT EXISTS achievements(id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE,
         name TEXT, description TEXT, reward INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS user_achievements(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
@@ -588,6 +590,13 @@ async def case_info(callback: CallbackQuery):
         f"📦 <b>{escape(row['name'])}</b>\n\n{escape(row['description'])}\n\n💰 <b>{row['price']} SD</b>",
         reply_markup=b.as_markup()); await callback.answer()
 
+def get_user_luck(uid):
+    """Player luck setting (1 = normal odds; higher levels visibly boost rare case drops)."""
+    con = db()
+    row = con.execute("SELECT level FROM user_luck WHERE user_id=?", (uid,)).fetchone()
+    con.close()
+    return max(1, min(100, int(row["level"]))) if row else 1
+
 async def _open_case(uid,cid,count=1):
     con = db()
     cr = con.execute("SELECT * FROM cases WHERE id=? AND enabled=1",(cid,)).fetchone()
@@ -605,7 +614,13 @@ async def _open_case(uid,cid,count=1):
     if not items: con.close(); return None,"Пусто"
     res = []
     for _ in range(count):
-        p = random.choices(items,weights=[float(x["chance"]) for x in items],k=1)[0]; res.append(p)
+        luck = get_user_luck(uid)
+        # Transparent case-only boost: normal odds at level 1; progressively favors rarer items.
+        rarity_boost = {"common": 1.0, "rare": 1.0 + 0.06*(luck-1),
+                        "epic": 1.0 + 0.16*(luck-1), "legendary": 1.0 + 0.30*(luck-1),
+                        "mythic": 1.0 + 0.50*(luck-1)}
+        weights = [max(0.0001, float(x["chance"]) * rarity_boost.get(str(x["rarity"]).lower(), 1.0)) for x in items]
+        p = random.choices(items, weights=weights, k=1)[0]; res.append(p)
         con.execute("INSERT INTO inventory(user_id,item_id,obtained_at) VALUES(?,?,?)",(uid,p["id"],now()))
         con.execute("INSERT INTO case_opens(user_id,case_id,item_id,created_at) VALUES(?,?,?,?)",(uid,cid,p["id"],now()))
     xp = int(10*count*(SUB_BONUS["xp_mult"] if has_sub(u) else 1))
@@ -732,7 +747,7 @@ async def profile(callback: CallbackQuery):
         f"👤 <b>ПРОФИЛЬ</b>\n\nID: <code>{u['user_id']}</code>\n@{escape(u['username'] or 'нет')}\n\n"
         f"{badge(u)}💰 SD: <b>{u['sd']}</b>\n⭐ Lv: <b>{u['level']}</b> · ✨ XP: <b>{u['xp']}</b>\n\n"
         f"🎁 Кейсов: <b>{ops}</b>\n🎒 Предметов: <b>{inv}</b>\n🏅 Достижений: <b>{achs}</b>\n"
-        f"👥 Рефералов: <b>{refs}</b>\n💎 CosDrop+: <b>{sub}</b>",reply_markup=back())
+        f"👥 Рефералов: <b>{refs}</b>\n🍀 Удача кейсов: <b>{get_user_luck(u['user_id'])}/100</b>\n💎 CosDrop+: <b>{sub}</b>",reply_markup=back())
     await callback.answer()
 
 @dp.callback_query(F.data == "balance")
@@ -1859,7 +1874,7 @@ def a2_root_kb():
         ("🎰 Казино","a2_casino"),("📜 Логи","a2_logs"),("🛠 Сервис","a2_maint"),
         ("📢 Рассылка","a2_broadcast"),("⚙️ Лимиты","a3_root"),
         ("💰 Экономика","a3_econ"),("🎯 Массовые","a3_mass"),
-        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),("🛒 Рынок/обмен","a2_economy_market"),("🎃 Хэллоуин","halloween_admin"),
+        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),("🛒 Рынок/обмен","a2_economy_market"),("🍀 Удача игрока","a2_luck"),("🎃 Хэллоуин","halloween_admin"),
         ("🔴 Выключить бота","a2_maintenance"),
         ("☢️ Сбросить ВСЁ у игроков","a2_wipe"),
         ("📁 Экспорт","a3_export"),("🛠 Диагностика","a3_diag"),
@@ -1888,6 +1903,42 @@ async def a2_close(callback: CallbackQuery, state: FSMContext):
     try: await callback.message.delete()
     except Exception: pass
     await callback.answer()
+
+@dp.callback_query(F.data == "a2_luck")
+async def a2_luck(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.clear()
+    await callback.message.edit_text(
+        "🍀 <b>УДАЧА ИГРОКА</b>\n\nВведи Telegram ID игрока.\nУровень 1 — обычные шансы; 2–100 — повышенный шанс редких предметов в кейсах.\nКазино и дуэли не подкручиваются.",
+        reply_markup=a2_cancel())
+    await state.set_state(A2Luck.uid)
+    await callback.answer()
+
+@dp.message(StateFilter(A2Luck.uid))
+async def a2_luck_uid(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    try: uid = int(message.text.strip())
+    except (ValueError, AttributeError): return await message.answer("Введи числовой Telegram ID.")
+    con = db(); exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone()
+    current = con.execute("SELECT level FROM user_luck WHERE user_id=?", (uid,)).fetchone(); con.close()
+    if not exists:
+        await state.clear(); return await message.answer("Игрок не найден в базе COS-DROP.", reply_markup=a2_root_kb())
+    await state.update_data(luck_uid=uid)
+    await state.set_state(A2Luck.level)
+    await message.answer(f"Игрок <code>{uid}</code>. Текущая удача: <b>{current['level'] if current else 1}/100</b>.\nВведи новый уровень от 1 до 100 (1 = обычные шансы):", reply_markup=a2_cancel())
+
+@dp.message(StateFilter(A2Luck.level))
+async def a2_luck_level(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    try: level = int(message.text.strip())
+    except (ValueError, AttributeError): return await message.answer("Нужно целое число от 1 до 100.")
+    if not 1 <= level <= 100: return await message.answer("Допустимый диапазон: 1–100.")
+    data = await state.get_data(); uid = int(data["luck_uid"])
+    con = db()
+    con.execute("INSERT INTO user_luck(user_id,level,updated_by,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET level=excluded.level,updated_by=excluded.updated_by,updated_at=excluded.updated_at", (uid,level,message.from_user.id,now()))
+    con.execute("INSERT INTO admin_logs(admin_id,action,target_user_id,details,created_at) VALUES(?,?,?,?,?)", (message.from_user.id,"set_player_luck",uid,f"level={level}",now()))
+    con.commit(); con.close(); await state.clear()
+    await message.answer(f"🍀 Для игрока <code>{uid}</code> установлен уровень удачи <b>{level}/100</b>.\nОн влияет на шанс редких предметов в кейсах; казино и дуэли остаются случайными.", reply_markup=a2_root_kb())
 
 @dp.callback_query(F.data == "a2_stats")
 async def a2_stats(callback: CallbackQuery):
