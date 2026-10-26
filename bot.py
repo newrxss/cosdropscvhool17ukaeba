@@ -118,12 +118,12 @@ class WithdrawFSM(StatesGroup): amount=State()
 class CasinoBet(StatesGroup): game=State(); amount=State()
 class DuelBet(StatesGroup): amount=State()
 class A2SD(StatesGroup): uid=State(); val=State(); mode=State()
+class A2Stars(StatesGroup): uid=State(); val=State(); mode=State()
 class A2XP(StatesGroup): uid=State(); val=State()
 class A2Msg(StatesGroup): uid=State(); text=State()
 class A2Search(StatesGroup): q=State()
 class A2Reset(StatesGroup): uid=State()
 class A2Premium(StatesGroup): uid=State(); hours=State()
-class A2Luck(StatesGroup): uid=State(); level=State()
 class A2Broadcast(StatesGroup): text=State()
 class A2Maintenance(StatesGroup): reason=State(); duration=State()
 class A3Limit(StatesGroup): key=State()
@@ -140,7 +140,7 @@ def init_db():
     con = db(); cur = con.cursor()
     cur.executescript("""
     CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER UNIQUE,
-        username TEXT, first_name TEXT, sd INTEGER DEFAULT 100, xp INTEGER DEFAULT 0,
+        username TEXT, first_name TEXT, sd INTEGER DEFAULT 100, stars INTEGER DEFAULT 0, xp INTEGER DEFAULT 0,
         level INTEGER DEFAULT 1, blocked INTEGER DEFAULT 0, created_at TEXT, last_activity TEXT,
         daily_claim TEXT, daily_streak INTEGER DEFAULT 0, last_case_at TEXT,
         referrer_id INTEGER, donated INTEGER DEFAULT 0, sub_until TEXT,
@@ -166,13 +166,14 @@ def init_db():
     CREATE TABLE IF NOT EXISTS admin_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, admin_id INTEGER,
         action TEXT, target_user_id INTEGER, details TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-    CREATE TABLE IF NOT EXISTS user_luck(user_id INTEGER PRIMARY KEY, level INTEGER NOT NULL DEFAULT 1, updated_by INTEGER, updated_at TEXT);
     CREATE TABLE IF NOT EXISTS achievements(id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE,
         name TEXT, description TEXT, reward INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS user_achievements(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
         achievement_id INTEGER, obtained_at TEXT, UNIQUE(user_id,achievement_id));
     CREATE TABLE IF NOT EXISTS withdraws(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
         amount INTEGER, status TEXT DEFAULT 'pending', admin_id INTEGER, created_at TEXT, decided_at TEXT);
+    CREATE TABLE IF NOT EXISTS star_transactions(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+        amount INTEGER NOT NULL, kind TEXT NOT NULL, admin_id INTEGER, note TEXT, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE,
         name TEXT, description TEXT, goal INTEGER, reward INTEGER);
     CREATE TABLE IF NOT EXISTS user_tasks(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
@@ -225,7 +226,7 @@ def init_db():
         ("referrer_id", "INTEGER"), ("donated", "INTEGER DEFAULT 0"),
         ("sub_until", "TEXT"), ("daily_streak", "INTEGER DEFAULT 0"),
         ("daily_loss", "INTEGER DEFAULT 0"), ("daily_loss_date", "TEXT"),
-        ("tag", "TEXT"), ("last_case_at", "TEXT"),
+        ("tag", "TEXT"), ("last_case_at", "TEXT"), ("stars", "INTEGER DEFAULT 0"),
     ]:
         if col not in u_cols:
             try: cur.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
@@ -300,7 +301,7 @@ def init_db():
         ("referrer_id", "INTEGER"), ("donated", "INTEGER DEFAULT 0"),
         ("sub_until", "TEXT"), ("daily_streak", "INTEGER DEFAULT 0"),
         ("daily_loss", "INTEGER DEFAULT 0"), ("daily_loss_date", "TEXT"),
-        ("tag", "TEXT"), ("last_case_at", "TEXT"),
+        ("tag", "TEXT"), ("last_case_at", "TEXT"), ("stars", "INTEGER DEFAULT 0"),
     ]:
         if col not in u_cols:
             try: cur.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
@@ -590,13 +591,6 @@ async def case_info(callback: CallbackQuery):
         f"📦 <b>{escape(row['name'])}</b>\n\n{escape(row['description'])}\n\n💰 <b>{row['price']} SD</b>",
         reply_markup=b.as_markup()); await callback.answer()
 
-def get_user_luck(uid):
-    """Player luck setting (1 = normal odds; higher levels visibly boost rare case drops)."""
-    con = db()
-    row = con.execute("SELECT level FROM user_luck WHERE user_id=?", (uid,)).fetchone()
-    con.close()
-    return max(1, min(100, int(row["level"]))) if row else 1
-
 async def _open_case(uid,cid,count=1):
     con = db()
     cr = con.execute("SELECT * FROM cases WHERE id=? AND enabled=1",(cid,)).fetchone()
@@ -614,13 +608,7 @@ async def _open_case(uid,cid,count=1):
     if not items: con.close(); return None,"Пусто"
     res = []
     for _ in range(count):
-        luck = get_user_luck(uid)
-        # Transparent case-only boost: normal odds at level 1; progressively favors rarer items.
-        rarity_boost = {"common": 1.0, "rare": 1.0 + 0.06*(luck-1),
-                        "epic": 1.0 + 0.16*(luck-1), "legendary": 1.0 + 0.30*(luck-1),
-                        "mythic": 1.0 + 0.50*(luck-1)}
-        weights = [max(0.0001, float(x["chance"]) * rarity_boost.get(str(x["rarity"]).lower(), 1.0)) for x in items]
-        p = random.choices(items, weights=weights, k=1)[0]; res.append(p)
+        p = random.choices(items,weights=[float(x["chance"]) for x in items],k=1)[0]; res.append(p)
         con.execute("INSERT INTO inventory(user_id,item_id,obtained_at) VALUES(?,?,?)",(uid,p["id"],now()))
         con.execute("INSERT INTO case_opens(user_id,case_id,item_id,created_at) VALUES(?,?,?,?)",(uid,cid,p["id"],now()))
     xp = int(10*count*(SUB_BONUS["xp_mult"] if has_sub(u) else 1))
@@ -747,7 +735,7 @@ async def profile(callback: CallbackQuery):
         f"👤 <b>ПРОФИЛЬ</b>\n\nID: <code>{u['user_id']}</code>\n@{escape(u['username'] or 'нет')}\n\n"
         f"{badge(u)}💰 SD: <b>{u['sd']}</b>\n⭐ Lv: <b>{u['level']}</b> · ✨ XP: <b>{u['xp']}</b>\n\n"
         f"🎁 Кейсов: <b>{ops}</b>\n🎒 Предметов: <b>{inv}</b>\n🏅 Достижений: <b>{achs}</b>\n"
-        f"👥 Рефералов: <b>{refs}</b>\n🍀 Удача кейсов: <b>{get_user_luck(u['user_id'])}/100</b>\n💎 CosDrop+: <b>{sub}</b>",reply_markup=back())
+        f"👥 Рефералов: <b>{refs}</b>\n💎 CosDrop+: <b>{sub}</b>",reply_markup=back())
     await callback.answer()
 
 @dp.callback_query(F.data == "balance")
@@ -1371,10 +1359,10 @@ async def ref_menu(callback: CallbackQuery):
 @dp.callback_query(F.data == "rating")
 async def rating(callback: CallbackQuery):
     con = db()
-    rows = con.execute("""SELECT username,first_name,xp,
+    rows = con.execute("""SELECT username,first_name,stars,xp,
         (SELECT COUNT(*) FROM inventory i WHERE i.user_id=u.user_id) items
-        FROM users u WHERE blocked=0 ORDER BY xp DESC, items DESC LIMIT 10""").fetchall(); con.close()
-    txt = "🏆 <b>ТОП-10</b>\n\n"+("\n".join(f"{i}. @{escape(r['username'] or r['first_name'] or '-')} — ⭐ {r['xp']} · 🎒 {r['items']}" for i,r in enumerate(rows,1)) if rows else "Пусто.")
+        FROM users u WHERE blocked=0 ORDER BY stars DESC, xp DESC, items DESC LIMIT 10""").fetchall(); con.close()
+    txt = "🏆 <b>ТОП-10 ПО STARS</b>\n\n"+("\n".join(f"{i}. @{escape(r['username'] or r['first_name'] or '-')} — ⭐ <b>{r['stars']}</b> Stars · 🎒 {r['items']}" for i,r in enumerate(rows,1)) if rows else "Пусто.")
     await callback.message.edit_text(txt,reply_markup=back()); await callback.answer()
 
 async def check_achievements(uid):
@@ -1874,7 +1862,7 @@ def a2_root_kb():
         ("🎰 Казино","a2_casino"),("📜 Логи","a2_logs"),("🛠 Сервис","a2_maint"),
         ("📢 Рассылка","a2_broadcast"),("⚙️ Лимиты","a3_root"),
         ("💰 Экономика","a3_econ"),("🎯 Массовые","a3_mass"),
-        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),("🛒 Рынок/обмен","a2_economy_market"),("🍀 Удача игрока","a2_luck"),("🎃 Хэллоуин","halloween_admin"),
+        ("🏆 СЕЗОНЫ / СОБЫТИЯ","a2_season"),("🛒 Рынок/обмен","a2_economy_market"),("🎃 Хэллоуин","halloween_admin"),
         ("🔴 Выключить бота","a2_maintenance"),
         ("☢️ Сбросить ВСЁ у игроков","a2_wipe"),
         ("📁 Экспорт","a3_export"),("🛠 Диагностика","a3_diag"),
@@ -1903,42 +1891,6 @@ async def a2_close(callback: CallbackQuery, state: FSMContext):
     try: await callback.message.delete()
     except Exception: pass
     await callback.answer()
-
-@dp.callback_query(F.data == "a2_luck")
-async def a2_luck(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id): return
-    await state.clear()
-    await callback.message.edit_text(
-        "🍀 <b>УДАЧА ИГРОКА</b>\n\nВведи Telegram ID игрока.\nУровень 1 — обычные шансы; 2–100 — повышенный шанс редких предметов в кейсах.\nКазино и дуэли не подкручиваются.",
-        reply_markup=a2_cancel())
-    await state.set_state(A2Luck.uid)
-    await callback.answer()
-
-@dp.message(StateFilter(A2Luck.uid))
-async def a2_luck_uid(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    try: uid = int(message.text.strip())
-    except (ValueError, AttributeError): return await message.answer("Введи числовой Telegram ID.")
-    con = db(); exists = con.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone()
-    current = con.execute("SELECT level FROM user_luck WHERE user_id=?", (uid,)).fetchone(); con.close()
-    if not exists:
-        await state.clear(); return await message.answer("Игрок не найден в базе COS-DROP.", reply_markup=a2_root_kb())
-    await state.update_data(luck_uid=uid)
-    await state.set_state(A2Luck.level)
-    await message.answer(f"Игрок <code>{uid}</code>. Текущая удача: <b>{current['level'] if current else 1}/100</b>.\nВведи новый уровень от 1 до 100 (1 = обычные шансы):", reply_markup=a2_cancel())
-
-@dp.message(StateFilter(A2Luck.level))
-async def a2_luck_level(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id): return
-    try: level = int(message.text.strip())
-    except (ValueError, AttributeError): return await message.answer("Нужно целое число от 1 до 100.")
-    if not 1 <= level <= 100: return await message.answer("Допустимый диапазон: 1–100.")
-    data = await state.get_data(); uid = int(data["luck_uid"])
-    con = db()
-    con.execute("INSERT INTO user_luck(user_id,level,updated_by,updated_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET level=excluded.level,updated_by=excluded.updated_by,updated_at=excluded.updated_at", (uid,level,message.from_user.id,now()))
-    con.execute("INSERT INTO admin_logs(admin_id,action,target_user_id,details,created_at) VALUES(?,?,?,?,?)", (message.from_user.id,"set_player_luck",uid,f"level={level}",now()))
-    con.commit(); con.close(); await state.clear()
-    await message.answer(f"🍀 Для игрока <code>{uid}</code> установлен уровень удачи <b>{level}/100</b>.\nОн влияет на шанс редких предметов в кейсах; казино и дуэли остаются случайными.", reply_markup=a2_root_kb())
 
 @dp.callback_query(F.data == "a2_stats")
 async def a2_stats(callback: CallbackQuery):
@@ -1982,7 +1934,7 @@ async def a2_users(callback: CallbackQuery):
     if not is_admin(callback.from_user.id): return
     b = InlineKeyboardBuilder()
     for t,d in [("📋 Список","a2u_list"),("🔎 Поиск","a2u_search"),
-        ("🎁 +SD","a2u_give_sd"),("➖ -SD","a2u_take_sd"),("⭐ +XP","a2u_give_xp"),
+        ("🎁 +SD","a2u_give_sd"),("➖ -SD","a2u_take_sd"),("⭐ +Stars","a2u_give_stars"),("➖ -Stars","a2u_take_stars"),("💸 Выплата Stars","a2u_payout_stars"),("⭐ +XP","a2u_give_xp"),
         ("🚫 Блок","a2u_block"),("🔓 Разблок","a2u_unblock"),("🗑 Сброс","a2u_reset"),
         ("💎 +Премиум","a2u_give_premium"),("❌ -Премиум","a2u_take_premium"),
         ("✉️ Письмо","a2u_msg"),("📄 CSV","a2u_export"),("◀️ Назад","a2_root")]:
@@ -2015,13 +1967,16 @@ async def a2u_search_do(message: Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 +SD",callback_data=f"a2u_gsd:{u['user_id']}"),
          InlineKeyboardButton(text="➖ -SD",callback_data=f"a2u_tsd:{u['user_id']}")],
+        [InlineKeyboardButton(text="⭐ +Stars",callback_data=f"a2u_gstars:{u['user_id']}"),
+         InlineKeyboardButton(text="➖ -Stars",callback_data=f"a2u_tstars:{u['user_id']}")],
+        [InlineKeyboardButton(text="💸 Списать выплату",callback_data=f"a2u_pstars:{u['user_id']}")],
         [InlineKeyboardButton(text="🚫 Блок" if not u['blocked'] else "🔓 Разблок",callback_data=f"a2u_tb:{u['user_id']}")],
         [InlineKeyboardButton(text="🗑 Сброс",callback_data=f"a2u_rst:{u['user_id']}")],
         [InlineKeyboardButton(text="💎 +Премиум",callback_data=f"a2u_gp:{u['user_id']}"),
          InlineKeyboardButton(text="❌ -Премиум",callback_data=f"a2u_tp:{u['user_id']}")],
         [InlineKeyboardButton(text="✉️ Письмо",callback_data=f"a2u_msgto:{u['user_id']}")],
         [InlineKeyboardButton(text="◀️ Назад",callback_data="a2_users")]])
-    await message.answer(f"👤 <code>{u['user_id']}</code>\n@{escape(u['username'] or '-')}\n💰 {u['sd']} · Lv {u['level']}",reply_markup=kb)
+    await message.answer(f"👤 <code>{u['user_id']}</code>\n@{escape(u['username'] or '-')}\n💰 {u['sd']} SD · ⭐ {u['stars']} Stars · Lv {u['level']}",reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("a2u_gsd:"))
 async def a2u_gsd(callback: CallbackQuery, state: FSMContext):
@@ -2069,6 +2024,104 @@ async def a2u_sd_uid(message: Message, state: FSMContext):
     try: uid = int(message.text)
     except Exception: return await message.answer("❌")
     await state.update_data(uid=uid); await state.set_state(A2SD.val); await message.answer("Значение:")
+
+@dp.callback_query(F.data == "a2u_give_stars")
+async def a2u_give_stars(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.update_data(mode="give")
+    await state.set_state(A2Stars.uid)
+    await callback.message.edit_text("⭐ Введи Telegram ID для начисления Stars:", reply_markup=a2_cancel())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a2u_take_stars")
+async def a2u_take_stars(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.update_data(mode="take")
+    await state.set_state(A2Stars.uid)
+    await callback.message.edit_text("➖ Введи Telegram ID для списания Stars:", reply_markup=a2_cancel())
+    await callback.answer()
+
+@dp.callback_query(F.data == "a2u_payout_stars")
+async def a2u_payout_stars(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    await state.update_data(mode="payout")
+    await state.set_state(A2Stars.uid)
+    await callback.message.edit_text("💸 Введи Telegram ID игрока, которому уже выплачиваешь Stars:", reply_markup=a2_cancel())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("a2u_gstars:"))
+async def a2u_gstars_target(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    uid = int(callback.data.split(":")[1])
+    await state.update_data(uid=uid, mode="give")
+    await state.set_state(A2Stars.val)
+    await callback.message.edit_text(f"⭐ Сколько Stars начислить игроку <code>{uid}</code>?", reply_markup=a2_cancel())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("a2u_tstars:"))
+async def a2u_tstars_target(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    uid = int(callback.data.split(":")[1])
+    await state.update_data(uid=uid, mode="take")
+    await state.set_state(A2Stars.val)
+    await callback.message.edit_text(f"➖ Сколько Stars списать у игрока <code>{uid}</code>?", reply_markup=a2_cancel())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("a2u_pstars:"))
+async def a2u_pstars_target(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id): return
+    uid = int(callback.data.split(":")[1])
+    await state.update_data(uid=uid, mode="payout")
+    await state.set_state(A2Stars.val)
+    await callback.message.edit_text(f"💸 Введи количество Stars, выплаченных игроку <code>{uid}</code>. Сумма будет списана с его баланса.", reply_markup=a2_cancel())
+    await callback.answer()
+
+@dp.message(StateFilter(A2Stars.uid))
+async def a2u_stars_uid(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    raw = (message.text or "").strip()
+    if not raw.isdigit(): return await message.answer("❌ Введи числовой Telegram ID.")
+    uid = int(raw)
+    con = db(); row = con.execute("SELECT user_id,stars FROM users WHERE user_id=?", (uid,)).fetchone(); con.close()
+    if not row: return await message.answer("❌ Игрок не найден в базе.")
+    await state.update_data(uid=uid)
+    await state.set_state(A2Stars.val)
+    data = await state.get_data()
+    action = "начислить" if data.get("mode") == "give" else ("списать как выплату" if data.get("mode") == "payout" else "списать")
+    await message.answer(f"Игрок <code>{uid}</code>, баланс ⭐ {row['stars']} Stars. Сколько {action}? Введи целое положительное число:")
+
+@dp.message(StateFilter(A2Stars.val))
+async def a2u_stars_val(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id): return
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or int(raw) <= 0:
+        return await message.answer("❌ Введи целое число больше нуля.")
+    amount = int(raw)
+    data = await state.get_data(); uid = int(data["uid"]); mode = data.get("mode", "give")
+    con = db()
+    row = con.execute("SELECT stars FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not row:
+        con.close(); await state.clear(); return await message.answer("❌ Игрок не найден.")
+    if mode in ("take", "payout"):
+        changed = con.execute("UPDATE users SET stars=stars-? WHERE user_id=? AND stars>=?", (amount, uid, amount)).rowcount
+        if not changed:
+            con.close(); return await message.answer(f"❌ Недостаточно Stars. Баланс: {row['stars']} ⭐")
+        kind = "payout" if mode == "payout" else "admin_subtract"
+        note = "Выплата отмечена администратором" if mode == "payout" else "Ручное списание администратором"
+        signed = -amount
+    else:
+        con.execute("UPDATE users SET stars=stars+? WHERE user_id=?", (amount, uid))
+        kind = "admin_add"; note = "Начисление администратором"; signed = amount
+    con.execute("INSERT INTO star_transactions(user_id,amount,kind,admin_id,note,created_at) VALUES(?,?,?,?,?,?)",
+                (uid, signed, kind, ADMIN_ID, note, now()))
+    new_balance = con.execute("SELECT stars FROM users WHERE user_id=?", (uid,)).fetchone()["stars"]
+    con.commit(); con.close()
+    log_admin(f"stars_{mode}", uid, f"amount={amount}; balance={new_balance}")
+    await state.clear()
+    await message.answer(f"✅ Готово. Игрок <code>{uid}</code>: ⭐ {new_balance} Stars\nОперация: {mode} {amount}.", reply_markup=a2_root_kb())
+    if mode == "payout":
+        try: await bot.send_message(uid, f"💸 Выплата отмечена администратором. Списано: ⭐ {amount} Stars. Остаток: ⭐ {new_balance}.")
+        except Exception: pass
 
 @dp.callback_query(F.data == "a2u_give_xp")
 async def a2u_give_xp(callback: CallbackQuery, state: FSMContext):
