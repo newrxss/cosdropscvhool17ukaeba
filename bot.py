@@ -612,8 +612,11 @@ async def _open_case(uid,cid,count=1):
         con.execute("INSERT INTO inventory(user_id,item_id,obtained_at) VALUES(?,?,?)",(uid,p["id"],now()))
         con.execute("INSERT INTO case_opens(user_id,case_id,item_id,created_at) VALUES(?,?,?,?)",(uid,cid,p["id"],now()))
     xp = int(10*count*(SUB_BONUS["xp_mult"] if has_sub(u) else 1))
-    con.execute("UPDATE users SET sd=sd-?, xp=xp+?, last_case_at=?, last_activity=? WHERE user_id=?",
-        (price,xp,now(),now(),uid))
+    stars_reward = 20 * count
+    con.execute("UPDATE users SET sd=sd-?, xp=xp+?, stars=stars+?, last_case_at=?, last_activity=? WHERE user_id=?",
+        (price,xp,stars_reward,now(),now(),uid))
+    con.execute("INSERT INTO star_transactions(user_id,amount,kind,admin_id,note,created_at) VALUES(?,?,?,?,?,?)",
+        (uid,stars_reward,"case_reward",None,f"Награда за открытие {count} кейс(ов)",now()))
     con.commit(); con.close(); return res,None
 
 @dp.callback_query(F.data.startswith("open:"))
